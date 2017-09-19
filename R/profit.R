@@ -1108,7 +1108,7 @@ profitFitGalaxyComponents <- function(image, sigma, psfim,
 		# Try a broken exponential
 		if(adddisk)
 		{
-			bexpname = "serbexp_fipa"
+			bexpname = "serbexp_frpa"
 			complete = !is.null(galfit$data[[bexpname]]) &&
 				!is.null(galfit$data[[bexpname]]$MLDone) &&
 				galfit$data[[bexpname]]$MLDone
@@ -1168,6 +1168,14 @@ profitFitGalaxyComponents <- function(image, sigma, psfim,
 				newData$parm.names = names(Data$init)
 				newData$mon.names = c(Data$mon.names, chisq="chisq")
 				newData$gain = gain_eff
+
+				mlfit = convergeFit(Data, inititer = maxiter/4, maxruns=maxrunsml,
+					domcmc = FALSE, docma = TRUE, cmasigma = cmasigma, cmaiter = 200,
+					cmaresetmaxruns = TRUE, cmasigmamult = 1, cmatolfrac = 0.01, maxwalltime = tfinal-tinit)
+				overtime = exceededmaxtime(tinit,tfinal)
+				if(!is.null(newData$convopt$fft$fftwplan)) newData$convopt$fft$fftwplan = NULL
+				galfit$data[[bexpname]] = list(Data=newData,MLFit=mlfit,MLDone=!overtime,DoMCMC=TRUE)
+				if(overtime) return(galfit)
 			}
 		}
 	}
