@@ -177,7 +177,7 @@ processImageSources <- function(maps, minpsmags, brightpsmags,
 		dimimg = dim(bmaps$img)
 		brightpsmag = brightpsmags[[band]]
 		gain = bmaps$gain_eff
-		stats = profitSegimStats(image=bmaps$img, segim=segim, skyRMS = bmaps$err,
+		stats = profoundSegimStats(image=bmaps$img, segim=segim, skyRMS = bmaps$err,
 			mask = mask, pixscale = 0.2, gain = gain, header = bmaps$hdr)
 		sources = selectSources(stats, minedgedist, dimimg, minmag=minpsmags[[band]],
 			brightpsmag = brightpsmag)

@@ -33,7 +33,7 @@ fitPointSources <- function(image, sigma, header, mask,
 		ra=segstats[obj,"RAcen"]
 		dec=segstats[obj,"Deccen"]
 		mag=-2.5*log10(segstats[obj,"flux"])
-		fwhm=2*segstats[obj,"maj"]
+		fwhm=2*segstats[obj,"semimaj"]
 		con=1/sqrt(segstats[obj,"con"])
 		axrat=segstats[obj,"axrat"]
 		ang=segstats[obj,"ang"]
@@ -268,11 +268,11 @@ fitGalaxies <- function(process, psffit, fitobj, band, header,
 			ra=segstats[obj,"RAcen"]
 			dec=segstats[obj,"Deccen"]
 			mag=segstats[obj,"mag"]
-			fwhm=2*segstats[obj,"maj"]
+			fwhm=2*segstats[obj,"semimaj"]
 			axrat=segstats[obj,"axrat"]
 			ang=segstats[obj,"ang"]
 
-			cutoutsize = ceiling(max(5*fwhm, 2*sqrt(segstats[obj,"N90"])))
+			cutoutsize = ceiling(max(6*fwhm, 3*sqrt(segstats[obj,"N90"])))
 			if(cutoutsize < mincutoutsize) cutoutsize = mincutoutsize
 			cutoutsize = c(cutoutsize,cutoutsize)
 
@@ -533,7 +533,7 @@ plotfitresiduals <- function(fits, multifit=NULL, fittype="data",
 }
 
 plotSourceFits <- function(bpsfits, procmaps, band, fullfits=list(NULL,NULL),
-	gain_eff=0, profile="moffat", plotlims = list(
+	gain_eff=0, profile="moffat", maxcomp=1, plotlims = list(
 		mag=c(-Inf,20), size = c(-Inf,1), axrat = c(-0.1,0)))
 {
 	fits = bpsfits
@@ -547,8 +547,12 @@ plotSourceFits <- function(bpsfits, procmaps, band, fullfits=list(NULL,NULL),
 	sizename = paste0(profile,".",varnames$size)
 	for(fittype in names(fittypes)[1])
 	{
-		posts = lapply(fits,function(x)	{
-			fit = x[[fittype]]
+		fitname = paste0(profile,maxcomp)
+		posts = list()
+		for(ifit in 1:length(fits))
+		{
+			x = fits[[ifit]]
+			fit = x[[fittype]][[fitname]]
 			gaine = fit$Data$gain
 			if(!is.null(gaine))
 			{
@@ -571,8 +575,8 @@ plotSourceFits <- function(bpsfits, procmaps, band, fullfits=list(NULL,NULL),
 			post[,xynames] = post[,xynames] + rep(xyoff,each=dim(post)[1])
 
 			if(within) rv = list(post=post, mon=fit$Fit$Monitor)
-			return(rv)
-		})
+			posts[[ifit]] = rv
+		}
 		names(posts) = names(fits)
 		for(post in names(posts))
 		{

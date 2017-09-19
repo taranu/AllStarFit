@@ -200,7 +200,7 @@ measureMapQuantiles <- function(galdata, fitdata, kpcinasec,
 			quantconvfovrat=sumquantconvfov/modelflux,
 			sumquantrat=sumquantrat))
 
-		stats = profitSegimStats(quantmap, segim = quantmap>0, mask = quantmap<=0)
+		stats = profoundSegimStats(quantmap, segim = quantmap>0, mask = quantmap<=0)
 		vdivsig = vabs/kinmaps$vd
 		vdivsig[!is.finite(vdivsig)] = 0
 		lfov = quantconvfov
