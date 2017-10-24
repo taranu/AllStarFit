@@ -54,6 +54,8 @@ magtriplus=function(chains, plotlegend=FALSE, samples=NULL, samptype='end',
 	defaultcols = c("black","red","blue","green")
 )
 {
+	# Current cex value
+	ccex = par("cex")
 	# 1D 1-sigma, 2D 1,2,3 sigma
 	ltys = c(2,5,4,3)
 	mltys = c(6,1)
@@ -229,7 +231,7 @@ magtriplus=function(chains, plotlegend=FALSE, samples=NULL, samptype='end',
           		else magcon(xtemp,ytemp, chain$consd*c(diff(xrange),diff(yrange)), dobar=FALSE, doim=FALSE,add=TRUE,
 								lty=chain$ltys[2:4], xlim=xrange,ylim=yrange, col=chain$concol, ngrid=1e3)
           	}
-	          points(chain$means[col], chain$means[row],col=chain$pointcol,pch=chain$pty,cex=2)
+	          points(chain$means[col], chain$means[row],col=chain$pointcol,pch=chain$pty,cex=2*ccex)
 	          if(chaini == 1)
 	          {
 	          	box()
@@ -258,11 +260,11 @@ magtriplus=function(chains, plotlegend=FALSE, samples=NULL, samptype='end',
           {
           	if(is.null(chain$pointcols)) pch='.'
           	else pch=chain$pointtypes
-          	pcex = 1/(1+0.5*!is.null(chain$pointcols))
+          	pcex = ccex/(1+0.5*!is.null(chain$pointcols))
             pointcol = chain$pointcols
           	if(length(pointcol) >= max(chain$samples)) pointcol = pointcol[chain$samples]
 	          points(chain$data[chain$samples,c(col,row)],pch=pch,col=pointcol, cex=pcex)
-	          points(chain$means[col], chain$means[row],col=chain$pointcol,pch=chain$pty,cex=2)
+	          points(chain$means[col], chain$means[row],col=chain$pointcol,pch=chain$pty,cex=2*ccex)
           }
           box()
         }
