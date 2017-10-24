@@ -45,6 +45,9 @@ makeQuantileMaps <- function(image, modelflux=sum(image),
 	return(rval)
 }
 
+# Zeroes out negative pixels after FFT convolution, attempting to preserve
+# total flux by keeping the sum of zeroed pixels close to zero
+# Useful if you need a positive convolved image
 fitfftconvpos <- function(image)
 {
 	if(any(image < 0))
@@ -74,12 +77,12 @@ testQuantileMaps <- function(gid, proj, kpcinasec, survey="kids", snap="008192",
 }
 
 measureMapQuantiles <- function(galdata, fitdata, kpcinasec,
-	kinpixrat = 5/2, finesample = 6L,	meanvspaxels = 8, spaxscale=0.5,
+	kindown = 5, alldown = 3, finesample = 6L,
+	kinpixrat=kindown*alldown/finesample,
+	meanvspaxels = 8, spaxscale=0.5, fovradinpix=15,
 	returnmaps=FALSE, fileprefix=NULL, filepostfix=NULL, minkincounts=0)
 {
 	stopifnot(meanvspaxels >= 1)
-	kindown = 5
-	alldown = 3
 	stopifnot(kindown*alldown == kinpixrat*finesample)
 
 	kinmaps = list(
@@ -150,30 +153,32 @@ measureMapQuantiles <- function(galdata, fitdata, kpcinasec,
 	modelflux = sum(10^(-0.4*finemodel$modellist$sersic$mag))/gain
 	quantm = makeQuantileMaps(finemodel$image, modelflux = modelflux)
 
-	samifov = ceiling(profitMakeModel(modellist = list(
-		sersic=list(xcen=kindim[1]/2,ycen=kindim[2]/2, mag=0, nser=0.5, re=15, box=0)),
+	kinfov = ceiling(profitMakeModel(modellist = list(sersic=list(
+			xcen=kindim[1]/2,ycen=kindim[2]/2, mag=0,
+			nser=0.5,	re=fovradinpix, box=0)),
 		dim = kindim, remax = 1)$z)
-	samicond = as.logical(samifov) & ((kinmaps$l*galdata$kingain) >= minkincounts)
+	kincond = as.logical(kinfov) & ((kinmaps$l*galdata$kingain) >= minkincounts)
 	samipsfavg = profitMakeModel(modellist = list(
 		moffat=list(xcen=kindim[1]/2,ycen=kindim[2]/2, mag=0, con=2, fwhm=4, box=0)),
 		dim = kindim)$z
-	print(c(sumpsf=sum(samipsfavg),sumpsffov=sum(samipsfavg[samicond])))
+	print(c(sumpsf=sum(samipsfavg),sumpsffov=sum(samipsfavg[kincond])))
 
-	samifine = profitDownsample(finemodel$image,kindown)
-	benchconv = profitBenchmarkConv(samifine, psf=kinpsf)
+	kinfine = profitDownsample(finemodel$image,kindown)
+	benchconv = profitBenchmarkConv(kinfine, psf=kinpsf)
 
-	samiconv = profitDownsample(fitfftconvpos(profitConvolvePSF(
-		samifine, psf=kinpsf, options=benchconv)),alldown)
-	print(c(sumsamiconv=sum(samiconv),sumsamiconvfov=sum(samiconv[samicond]))/modelflux)
+	kinconv = profitDownsample(fitfftconvpos(profitConvolvePSF(
+		kinfine, psf=kinpsf, options=benchconv)),alldown)
+	print(c(sumkinconv=sum(kinconv),sumkinconvfov=sum(kinconv[kincond]))/modelflux)
 
-	censpax = sort(samiconv, decreasing=TRUE, index.return=TRUE)$ix[1:meanvspaxels]
-	meanv = mean(samiconv[censpax]*kinmaps$v[censpax]/sum(samiconv[censpax]))
+	censpax = sort(kinconv, decreasing=TRUE, index.return=TRUE)$ix[1:meanvspaxels]
+	meanv = mean(kinconv[censpax]*kinmaps$v[censpax]/sum(kinconv[censpax]))
 	# Recenter
 	kinmaps$v = kinmaps$v - meanv
 	vabs = abs(kinmaps$v)
-	vabssq = vabs^2
+	vsq = (kinmaps$v)^2
 	vdsq = kinmaps$vd^2
-	smap = sqrt(vdsq + vabssq)
+	sone = sqrt(vdsq + vsq)
+	goodkin = kinmaps$vd > 0
 
 	cens = kindim/2
 	spax = list(
@@ -192,7 +197,7 @@ measureMapQuantiles <- function(galdata, fitdata, kpcinasec,
 		npix = sum(quantmap>0)/kindown^2
 		quantconv = profitDownsample(fitfftconvpos(profitConvolvePSF(
 			quantfine, psf=kinpsf, options=benchconv)),alldown)
-		quantconvfov = quantconv*samicond
+		quantconvfov = quantconv*kincond
 		sumquantconv=sum(quantconv)
 		sumquantconvfov=sum(quantconvfov)
 		sumquantrat = sumquantconvfov/sumquantconv
@@ -201,19 +206,20 @@ measureMapQuantiles <- function(galdata, fitdata, kpcinasec,
 			sumquantrat=sumquantrat))
 
 		stats = profoundSegimStats(quantmap, segim = quantmap>0, mask = quantmap<=0)
-		vdivsig = vabs/kinmaps$vd
-		vdivsig[!is.finite(vdivsig)] = 0
 		lfov = quantconvfov
 		lr = lfov*spax$r
 		totlfov = sum(lfov)
+		sumvabs = sum((vabs*lfov)[goodkin])
+		sumvd = sum((kinmaps$vd*lfov)[goodkin])
+
 		rval[[quantn]] = list(
-			sigma = sum(kinmaps$vd*lfov)/totlfov,
-			sone = sum(smap*lfov)/totlfov,
-			vdivsigma = sum(vdivsig*lfov)/totlfov,
-			vdivs = sum(vabs*lfov)/totlfov,
-			lambda = sum(vabs*lr)/sum(smap*lr),
-			vmax = max(vabs/samiconv),
-			j = sum(vabs*spax$r*lr)/totlfov,
+			sigma = sumvd/totlfov,
+			sone = sum(sone*lfov)/totlfov,
+			vdivsigma = sumvabs/sumvd,
+			vdivsone = sumvabs/sum((sone*lfov)[goodkin]),
+			lambda = sum((vabs*lr)[goodkin])/sum((sone*lr)[goodkin]),
+			vmax = max(vabs[goodkin & (lr>0)]),
+			j = sum(vabs*lr)/totlfov,
 			lquantfov=totlfov,
 			lquant=sum(quantmap),
 			quantratio = sumquantrat,
@@ -225,7 +231,7 @@ measureMapQuantiles <- function(galdata, fitdata, kpcinasec,
 		{
 			rval[[quantn]]$map = quantmap
 			rval[[quantn]]$mapconv = quantconv
-			rval[[quantn]]$mapfov = samicond
+			rval[[quantn]]$mapfov = kincond
 		}
 
 		#for(map in names(kinmaps))
