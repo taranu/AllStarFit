@@ -21,22 +21,23 @@ cutoutSourceWCS <- function(image, header, ra, dec, box,
 # 1/(4*prod(dim(sigma))*dnorm(0,sd=median(sigma)*gain)^2)
 # N = 1000^2, sd=100 (1e4 sky photons) gives skysd=0.0157 counts!
 fitPointSources <- function(image, sigma, header, mask,
-	segim, segstats, fitobj, gain, maxcomp=1,
+	segim, segstats, fitobj, gain=1, pixscale=1, maxcomp=1,
 	skybgsd=sqrt(median(sigma,na.rm = TRUE)*gain),
 	mincutoutsize=50, maxiter=1e3, nthreads=1L, domcmc=TRUE,
-	fits=list())
+	fitsky=FALSE, fits=list())
 {
 	objn=1
 	nobj = length(fitobj)
 	for(obj in fitobj)
 	{
-		ra=segstats[obj,"RAcen"]
-		dec=segstats[obj,"Deccen"]
-		mag=-2.5*log10(segstats[obj,"flux"])
-		fwhm=2*segstats[obj,"semimaj"]
-		con=1/sqrt(segstats[obj,"con"])
-		axrat=segstats[obj,"axrat"]
-		ang=segstats[obj,"ang"]
+		row = which(segstats$segID == obj)
+		ra=segstats[row,"RAcen"]
+		dec=segstats[row,"Deccen"]
+		mag=-2.5*log10(segstats[row,"flux"])
+		fwhm=2*segstats[row,"R50"]/pixscale
+		con=max(1.2,1/sqrt(segstats[row,"con"]))
+		axrat=segstats[row,"axrat"]
+		ang=segstats[row,"ang"]
 
 		cutoutsize = 5*fwhm
 		if(cutoutsize < mincutoutsize) cutoutsize = mincutoutsize
@@ -44,27 +45,27 @@ fitPointSources <- function(image, sigma, header, mask,
 
 		cutouts = cutoutSourceWCS(image, header, ra, dec, box=cutoutsize,
 			extras=list(segim=segim,sigma=sigma))
+		cutouts$maps$segim[!is.finite(cutouts$maps$segim)] = Inf
 		xy = cutouts$xy
 
 		maginit = mag -2.5*log10(gain)
 		lists = profitMakeLists(xcen = xy[1], ycen=xy[2], mag = maginit,
-			size = fwhm, slope = 5+0*con, ang = ang, axrat = axrat, profile="moffat",
+			size = fwhm, slope = con, ang = ang, axrat = axrat, profile="moffat",
 			xmin = 0, xmax=cutoutsize[1], magmin = maginit-5, magmax=maginit+5,
 			sizemin = 0.1,sizemax=cutoutsize[1], slopemin = 1.01,slopemax=10,
-			axratmin=0.1,axratmax=1, addsky = TRUE, skybg =0, fitsky = TRUE)
+			axratmin=0.1,axratmax=1, addsky = TRUE, skybg = 0, fitsky = fitsky)
 
 		sigmas = Inf+0*unlist(lists$modellist)
 		sigmas[length(sigmas)] = skybgsd
 		sigmas = relist(sigmas,skeleton = lists$modellist)
 
 		priors = profitMakePriors(lists$modellist, sigmas, lists$tolog, means=lists$modellist, allowflat = TRUE)
-		environment(priors) = new.env()
 
 		#lists$intervals$sky = list(bg=list(lim=skylevel+skyRMS*c(-5,5)))
 
 		Data=profitSetupData(cutouts$maps$image$image*gain,
 			sigma=cutouts$maps$sigma*gain, priors=priors,
-			segim=(cutouts$maps$segim == obj | cutouts$maps$segim <= 0),
+			region=(cutouts$maps$segim == obj | cutouts$maps$segim <= 0),
 			modellist=lists$modellist, tofit=lists$tofit, tolog=lists$tolog,
 			intervals=lists$intervals, algo.func='LD',like.func="norm",
 			verbose=FALSE,omp_threads = nthreads)
@@ -80,53 +81,64 @@ fitPointSources <- function(image, sigma, header, mask,
 		LDFit = c()
 		for(fittype in names(fittypes)[1])
 		{
-			fits[[objname]][[fittype]] = list(moffat1=list(Data=Data))
-			# TODO: fix this
-			if(fittypes[[fittype]])
+			if(is.null(fits[[objname]][[fittype]])) fits[[objname]][[fittype]] = list()
+			if(is.null(fits[[objname]][[fittype]]$moffat1))
 			{
-				best = getLDFitBest(LDFit)
-				Data$init = LDFit$Posterior1[best,]
-				bestmodel = profitMakeModel(
-					profitRemakeModellist(Data$init,Data = Data)$modellist,
-					magzero = Data$magzero,	psf = Data$psf,
-					dim = dim(Data$image), finesample = Data$finesample
-				)
-				Data$image = profitPoissonMonteCarlo(bestmodel$z + skyflux*skygain)
-				Data$sigma = sqrt(Data$image)
-				Data$image = Data$image - skyflux*skygain
+				fits[[objname]][[fittype]]$moffat1=list(Data=Data)
 			}
-			LDFit = convergeFit(Data, inititer = maxiter/2, finaliter=maxiter, domcmc=domcmc)
-			fits[[objname]][[fittype]]$moffat1$LDFit = LDFit
+			if(is.null(fits[[objname]][[fittype]]$moffat1$LDFit))
+			{
+				# TODO: fix this
+				if(fittypes[[fittype]])
+				{
+					best = getLDFitBest(LDFit)
+					Data$init = LDFit$Posterior1[best,]
+					bestmodel = profitMakeModel(
+						profitRemakeModellist(Data$init,Data = Data)$modellist,
+						magzero = Data$magzero,	psf = Data$psf,
+						dim = dim(Data$image), finesample = Data$finesample
+					)
+					Data$image = profitPoissonMonteCarlo(bestmodel$z + skyflux*skygain)
+					Data$sigma = sqrt(Data$image)
+					Data$image = Data$image - skyflux*skygain
+				}
+				fits[[objname]][[fittype]]$moffat1$LDFit = convergeFit(
+					Data, inititer = maxiter/2, finaliter=maxiter, domcmc=domcmc)
+			}
 			if(maxcomp > 1)
 			{
-				init = LDFit$par
-				bt = c(TRUE,TRUE)
-				lists = profitMakeLists(xcen=rep(unname(init["moffat.xcen"]),2),
-					ycen=rep(unname(init["moffat.ycen"]),2),
-					mag=rep(unname(init["moffat.mag"]-2.5*log10(0.5)),2),
-					size=rep(unname(init["moffat.fwhm"]),2) + c(0.05,-0.05),
-					slope = rep(unname(init["moffat.con"]),2) + c(0,0.3),
-					ang = rep(unname(init["moffat.ang"]),2),
-					axrat = rep(unname(init["moffat.axrat"]),2), box = c(0,0),
-					profile="moffat",	unlog=TRUE, addsky = TRUE,
-					skybg = unname(init["sky.bg"]), fitx = c(TRUE,NA),
-					fitmag = c(TRUE,TRUE), fitsize = bt, fitslope=bt, fitang=bt,
-					fitaxrat=bt, fitbox=!bt, fitsky=TRUE)
-				sigmas = Inf+0*unlist(lists$modellist)
-				sigmas[length(sigmas)] = skybgsd
-				sigmas = relist(sigmas,skeleton = lists$modellist)
-				priors = profitMakePriors(lists$modellist, sigmas, lists$tolog, means=lists$modellist, allowflat = TRUE)
-				environment(priors) = new.env()
-				Data=profitSetupData(cutouts$maps$image$image*gain,
-					sigma=cutouts$maps$sigma*gain, priors=priors,
-					segim=(cutouts$maps$segim == obj | cutouts$maps$segim <= 0),
-					modellist=lists$modellist, tofit=lists$tofit, tolog=lists$tolog,
-					intervals=lists$intervals, algo.func='LD',like.func="norm",
-					verbose=FALSE,omp_threads = nthreads)
-				Data$gain = gain
-				Data$header = cutouts$maps$image$header
-				LDFit = convergeFit(Data, inititer = maxiter/2, finaliter=maxiter, domcmc=domcmc)
-				fits[[objname]][[fittype]]$moffat2=list(Data=Data,LDFit=LDFit)
+				if(is.null(fits[[objname]][[fittype]]$moffat2)) fits[[objname]][[fittype]]$moffat2 = list()
+				if(is.null(fits[[objname]][[fittype]]$moffat2$LDFit))
+				{
+					init = fits[[objname]][[fittype]]$moffat1$LDFit$par
+					bt = c(TRUE,TRUE)
+					lists = profitMakeLists(xcen=rep(unname(init["moffat.xcen"]),2),
+						ycen=rep(unname(init["moffat.ycen"]),2),
+						mag=rep(unname(init["moffat.mag"]-2.5*log10(0.5)),2),
+						size=rep(unname(init["moffat.fwhm"]),2) + c(0.05,-0.05),
+						slope = rep(unname(init["moffat.con"]),2) + c(0,0.3),
+						ang = rep(unname(init["moffat.ang"]),2),
+						axrat = rep(unname(init["moffat.axrat"]),2), box = c(0,0),
+						profile="moffat",	unlog=TRUE, addsky = TRUE,
+						skybg = unname(init["sky.bg"]), fitx = c(TRUE,NA),
+						fitmag = c(TRUE,TRUE), fitsize = bt, fitslope=bt, fitang=bt,
+						fitaxrat=bt, fitbox=!bt, fitsky=TRUE)
+					sigmas = Inf+0*unlist(lists$modellist)
+					sigmas[length(sigmas)] = skybgsd
+					sigmas = relist(sigmas,skeleton = lists$modellist)
+					priors = profitMakePriors(lists$modellist, sigmas, lists$tolog, means=lists$modellist, allowflat = TRUE)
+					environment(priors) = new.env()
+					Data=profitSetupData(cutouts$maps$image$image*gain,
+						sigma=cutouts$maps$sigma*gain, priors=priors,
+						segim=(cutouts$maps$segim == obj | cutouts$maps$segim <= 0),
+						modellist=lists$modellist, tofit=lists$tofit, tolog=lists$tolog,
+						intervals=lists$intervals, algo.func='LD',like.func="norm",
+						verbose=FALSE,omp_threads = nthreads)
+					Data$gain = gain
+					Data$header = cutouts$maps$image$header
+					LDFit = convergeFit(Data, inititer = maxiter/2, finaliter=maxiter, domcmc=domcmc)
+					fits[[objname]][[fittype]]$moffat2=list(Data=Data,LDFit=LDFit)
+				}
 			}
 		}
 		objn = objn+1
@@ -134,11 +146,13 @@ fitPointSources <- function(image, sigma, header, mask,
 	return(fits)
 }
 
+# TODO: Use the same kind of return data structure as
+# the galaxy fitting procedure, overtime checks, etc.
 fitPSF <- function(image, sigma, hdr, mask, segim, psfits,
 	pointsources, means, sds, skypix = segim <= 0, init = means[1,],
 	maxcomp=1, skybg=0, gain_eff=1, finesample=1L,nthreads=1L,
 	inititer=500, finaliter=2000, docma=TRUE, fitboxmulti=FALSE,
-	plot=FALSE,	verbose=FALSE)
+	fits = list(), plot=FALSE,	verbose=FALSE)
 {
 	if(maxcomp > 2) maxcomp = 2
 	posmask = skypix
@@ -151,73 +165,87 @@ fitPSF <- function(image, sigma, hdr, mask, segim, psfits,
 		slope = unname(init["moffat.con"]), ang = unname(init["moffat.ang"]),
 		axrat = unname(init["moffat.axrat"]), ispsf = TRUE, profile="moffat",
 		boxmin = -0.2, boxmax=0.2, fitmag = FALSE, fitbox = TRUE, unlog=TRUE)
-	rv = list()
 	constraints = NULL
-	for(fitps in c(FALSE,TRUE))
+	fitname = paste0("moffat",maxcomp)
+	if(is.null(fits[[fitname]]$Data))
 	{
-		pslists = profitMakeLists(xcen = means[,"moffat.xcen"],
-			ycen=means[,"moffat.ycen"], mag=means[,"moffat.mag"]-2.5*log10(gain_eff),
-			profile="pointsource", fitx=fitps&allt, fity = fitps&allt, fitmag=fitps&allt,
-			xsd = 3*sds[,"moffat.xcen"], ysd = 3*sds[,"moffat.ycen"],
-			magsd = 3*sds[,"moffat.mag"], unlog=TRUE,
-			skybg = skybg*gain_eff, addsky=TRUE, fitsky = TRUE)
-		lists = profitCombineLists(list(psf=psflists, pointsource=pslists))
-
-		Data = profitSetupData(image=image*gain_eff,sigma = sigma*gain_eff, mask=mask,
-			modellist = lists$modellist, tofit = lists$tofit, tolog=lists$tolog, intervals = lists$intervals,
-			priors=lists$priors, constraints = constraints, algo.func="LD", like.func="norm",
-			verbose=(verbose && !fitps), omp_threads=nthreads)
-		Data$gain = gain_eff
-		if(!fitps) init = Data$init
-		else if(maxcomp == 1) Data$init[names(init)] = init
-
-		if(plot) {
-			rv = profitLikeModel(Data$init, Data, makeplots = T, plotchisq = T)
-			print(rv$Monitor)
-		}
-
-		if(!fitps)
+		for(fitps in c(FALSE,TRUE))
 		{
-			cmasigma = formals(lists$priors)$sigmas[formals(lists$priors)$tofit]/3
-			extrapar = c("fwhm","con","ang","axrat")
-			cmasigma[c(paste0("psf.moffat.",c(extrapar,"box")),"sky.bg")] = c(median(sds[,c(paste0("moffat.",extrapar))]),
-				0.1,median(sds[,"sky.bg"]))
-		} else {
-			moffatpars = extrapar
-			if(!((maxcomp > 1) && !fitboxmulti)) moffatpars = c(extrapar,"box")
-			cmasigma = c(rep(0.1,each=maxcomp-1),rep(cmasigma[paste0("psf.moffat.",
-					moffatpars)],each=maxcomp),
-				as.vector(sds[,paste0("moffat.",c("xcen","ycen","mag"))]),
-				cmasigma["sky.bg"])
-		}
-		fit = convergeFit(Data, init=Data$init, inititer = inititer, finaliter=finaliter,
-			maxeval=inititer, ftol_rel = (1e-6)*(1-fitps), domcmc = FALSE, domlfit = TRUE,
-			docma=docma, cmasigma = cmasigma, cmasigmamult = c(1), cmaiter = 100)
-		init = fit$par
-		if(is.null(names(init))) names(init) = names(Data$init)
-		if(maxcomp > 1 && !fitps)
-		{
-			psflists = profitMakeLists(xcen=c(0,NA),ycen=c(0,NA), mag=rep(-2.5*log10(0.5),2),
-				size=rep(unname(init["psf.moffat.fwhm"]),2) + c(0,-0.1),
-				slope = rep(unname(init["psf.moffat.con"]),2) + c(0,0.3), ang = rep(unname(init["psf.moffat.ang"]),2),
-				axrat = rep(unname(init["psf.moffat.axrat"]),2), box=rep(0,2), #box = rep(unname(init["psf.moffat.box"]),2),
-				ispsf = TRUE, profile="moffat", fitmag = c(TRUE,FALSE), fitbox = rep(fitboxmulti,2),
-				magmin = -2.5*log10(0.9999), magmax = -2.5*log10(1-0.9999), boxmin=-0.2, boxmax=0.2, unlog=TRUE)
-			constraints <- function(modellist) {
-				modellist$psf$moffat$mag[2] = -2.5*log10(1-10^(-0.4*modellist$psf$moffat$mag[1]))
-				return=modellist
+			pslists = profitMakeLists(xcen = means[,"moffat.xcen"],
+				ycen=means[,"moffat.ycen"], mag=means[,"moffat.mag"]-2.5*log10(gain_eff),
+				profile="pointsource", fitx=fitps&allt, fity = fitps&allt, fitmag=fitps&allt,
+				xsd = 3*sds[,"moffat.xcen"], ysd = 3*sds[,"moffat.ycen"],
+				magsd = 3*sds[,"moffat.mag"], unlog=TRUE,
+				skybg = skybg*gain_eff, addsky=TRUE, fitsky = TRUE)
+			lists = profitCombineLists(list(psf=psflists, pointsource=pslists))
+
+			Data = profitSetupData(image=image*gain_eff,sigma = sigma*gain_eff, mask=mask,
+				modellist = lists$modellist, tofit = lists$tofit, tolog=lists$tolog, intervals = lists$intervals,
+				priors=lists$priors, constraints = constraints, algo.func="LD", like.func="norm",
+				verbose=(verbose && !fitps), omp_threads=nthreads)
+			Data$gain = gain_eff
+			if(!fitps) init = Data$init
+			else if(maxcomp == 1) Data$init[names(init)] = init
+
+			if(plot) {
+				rv = profitLikeModel(Data$init, Data, makeplots = T, plotchisq = T)
+				print(rv$Monitor)
+			}
+
+			if(!fitps)
+			{
+				cmasigma = formals(lists$priors)$sigmas[formals(lists$priors)$tofit]/3
+				extrapar = c("fwhm","con","ang","axrat")
+				cmasigma[c(paste0("psf.moffat.",c(extrapar,"box")),"sky.bg")] = c(median(sds[,c(paste0("moffat.",extrapar))]),
+					0.1,median(sds[,"sky.bg"]))
+			} else {
+				moffatpars = extrapar
+				if(!((maxcomp > 1) && !fitboxmulti)) moffatpars = c(extrapar,"box")
+				cmasigma = c(rep(0.1,each=maxcomp-1),rep(cmasigma[paste0("psf.moffat.",
+						moffatpars)],each=maxcomp),
+					as.vector(sds[,paste0("moffat.",c("xcen","ycen","mag"))]),
+					cmasigma["sky.bg"])
+			}
+			if(fitps && (!is.null(fits$par) && (length(fits$par)) == length(Data$init))) init = fits$par
+			else
+			{
+				fit = convergeFit(Data, init=Data$init, inititer = inititer, finaliter=finaliter,
+					maxeval=inititer, ftol_rel = (1e-6)*(1-fitps), domcmc = FALSE, domlfit = TRUE,
+					docma=docma, cmasigma = cmasigma, cmasigmamult = c(1), cmaiter = 100)
+				init = fit$par
+			}
+			if(is.null(names(init))) names(init) = names(Data$init)
+			if(maxcomp > 1 && !fitps)
+			{
+				if(is.null(fits$moffat1)) fits$moffat1 = list(Data=Data, MLFit = fit, pointsources=pointsources)
+				psflists = profitMakeLists(xcen=c(0,NA),ycen=c(0,NA), mag=rep(-2.5*log10(0.5),2),
+					size=rep(unname(init["psf.moffat.fwhm"]),2) + c(0,-0.1),
+					slope = rep(unname(init["psf.moffat.con"]),2) + c(0,0.3), ang = rep(unname(init["psf.moffat.ang"]),2),
+					axrat = rep(unname(init["psf.moffat.axrat"]),2), box=rep(0,2), #box = rep(unname(init["psf.moffat.box"]),2),
+					ispsf = TRUE, profile="moffat", fitmag = c(TRUE,FALSE), fitbox = rep(fitboxmulti,2),
+					magmin = -2.5*log10(0.9999), magmax = -2.5*log10(1-0.9999), boxmin=-0.2, boxmax=0.2, unlog=TRUE)
+				constraints <- function(modellist) {
+					modellist$psf$moffat$mag[2] = -2.5*log10(1-10^(-0.4*modellist$psf$moffat$mag[1]))
+					return=modellist
+				}
 			}
 		}
+		Data$init = init
+		fits[[fitname]] = list(Data=Data,pointsources=pointsources)
+	} else {
+		for(var in c("xcen","ycen","mag")) fits[[fitname]]$Data$modellist[[var]] =
+			fits[[fitname]]$Data$modellist[[var]] | TRUE
 	}
-	Data$algo.func = "LD"
-	LDfit = convergeFit(Data, init=init, inititer = inititer, finaliter=finaliter, initalg = "HARM",
-		initspecs = list(alpha.star=0.234, B=NULL))
-	return(list(Data=Data,LDFit=LDfit,pointsources=pointsources))
+	fits[[fitname]]$Data$algo.func = "LD"
+	fits[[fitname]]$LDFit = convergeFit(fits[[fitname]]$Data, inititer = inititer,
+		finaliter=finaliter, initalg = "HARM", initspecs = list(alpha.star=0.234, B=NULL))
+	return(fits)
 }
 
 fitGalaxies <- function(process, psffit, fitobj, band, header,
 	fits=list(), maxcomp=2, gain=1, mincutoutsize=36, finesample=1L,
-	nthreads=1L, maxiter=2e3L, domcmc = (length(fitobj) == 1))
+	nthreads=1L, maxiter=2e3L, domcmc = (length(fitobj) == 1),
+	pixscale=1, autocropband = band, dobrokenexp=FALSE, test=FALSE)
 {
 	stopifnot(band %in% names(process$single))
 	image = psffit$Data$image
@@ -249,16 +277,18 @@ fitGalaxies <- function(process, psffit, fitobj, band, header,
 		biggestpsf = getLDFitParm(psffit, which=which.max(psffit$LDFit$Posterior1[,"psf.moffat.fwhm"]))
 	else # too much effort to find the biggest one in multi-component PSFs
 		biggestpsf = bestpsf
-	psfim = makeProfitPSFAutoSize(profitRemakeModellist(biggestpsf,
-		Data = psffit$Data)$modellist$psf,minpsfsum = 0.998)
+	psfmodel = profitRemakeModellist(biggestpsf, Data = psffit$Data)$modellist$psf
+	psfim = makeProfitPSFAutoSize(psfmodel,minpsfsum = 0.998, finesample=finesample,
+		returnfine = TRUE)
 	psfim = psfim/sum(psfim)
 	psfdim = dim(psfim)
-	if(mincutoutsize < psfdim[1]) mincutoutsize = psfdim[1]
-	if(finesample > 1L)
+	if(mincutoutsize < max(psfdim)/finesample) mincutoutsize = round(max(psfdim)/finesample)
+	if(FALSE)
 	{
-		psfmodel = psffit$Data$modellist$psf
-		psfmodel$moffat[c("xcen","ycen")] = psfdim*finesample/2
-		psfim = profitMakeModel(psfmodel,finesample = finesample,dim = psfdim*finesample)
+		ncomps = length(psfmodel$moffat$mag)
+		psfmodel$moffat$xcen = rep(psfdim[1]*finesample/2,ncomps)
+		psfmodel$moffat$ycen = rep(psfdim[2]*finesample/2,ncomps)
+		psfim = profitMakeModel(psfmodel,finesample = finesample,dim = psfdim*finesample)$z
 	}
 
 	for(obj in as.character(fitobj))
@@ -268,11 +298,13 @@ fitGalaxies <- function(process, psffit, fitobj, band, header,
 			ra=segstats[obj,"RAcen"]
 			dec=segstats[obj,"Deccen"]
 			mag=segstats[obj,"mag"]
-			fwhm=2*segstats[obj,"semimaj"]
+			re=segstats[obj,"R50"]/pixscale
 			axrat=segstats[obj,"axrat"]
 			ang=segstats[obj,"ang"]
 
-			cutoutsize = ceiling(max(6*fwhm, 3*sqrt(segstats[obj,"N90"])))
+			# ensure cutout size is divisible by 10
+			cutoutsize = 2*5*ceiling(max(c(3,1.5)*process$single[[autocropband]]$stats[obj,
+				c("R50","R90")]/pixscale)/5)
 			if(cutoutsize < mincutoutsize) cutoutsize = mincutoutsize
 			cutoutsize = c(cutoutsize,cutoutsize)
 
@@ -280,7 +312,7 @@ fitGalaxies <- function(process, psffit, fitobj, band, header,
 				extras=list(segim=segim,sigma=sigma))
 			xy = cutouts$xy
 
-			init = list(x=unname(xy[,"x"]), y=unname(xy[,"y"]), size=fwhm, mag=mag,
+			init = list(x=unname(xy[,"x"]), y=unname(xy[,"y"]), size=re, mag=mag,
 				slope=2, ang=ang, axrat=axrat, box=0)
 			segobjs = as.integer(c(0, obj))
 
@@ -288,7 +320,8 @@ fitGalaxies <- function(process, psffit, fitobj, band, header,
 				sigma=cutouts$maps$sigma, psfim=psfim, segim=cutouts$maps$segim,
 				segobjs = segobjs, init=init, gain_eff=gain, skylevel = 0, maxcomp=maxcomp,
 				chisqrtarg=chisqredpsf, chisqrminratio = chisqredpsf+0.02,
-				nthreads=nthreads, maxiter=maxiter, domcmc = domcmc, galfit=fits[[obj]])
+				nthreads=nthreads, maxiter=maxiter, domcmc = domcmc, galfit=fits[[obj]],
+				finesample = finesample, dobrokenexp = dobrokenexp)
 			fits[[obj]] = galfit
 		}
 	}
@@ -425,7 +458,7 @@ makeModelSegmap <- function(process, psffit, galfits=NULL,
 }
 
 allStarFitCompact <- function(proc, maps, bands = names(proc$single), maxcomp=1,
-	domcmc=TRUE, fits=list())
+	pixscale=proc$multi$proc$pixscale, domcmc=TRUE, fits=list())
 {
 	stopifnot(all(bands %in% names(proc$single)))
 	segim = proc$multi$proc$segim
@@ -440,13 +473,15 @@ allStarFitCompact <- function(proc, maps, bands = names(proc$single), maxcomp=1,
 		sources = bproc$sources$compact
 		fits[[band]] = fitPointSources(bmaps$img, bmaps$err, header = bmaps$hdr,
 				mask=mask, segim=segim, segstats = bproc$stats, fitobj = sources,
-				gain=gain, maxcomp=maxcomp, domcmc=domcmc, fits=fits[[band]])
+				gain=gain, maxcomp=maxcomp, domcmc=domcmc, fits=fits[[band]],
+				pixscale=pixscale)
 		#plotSourceFits(psfits, procmaps, band)
 	}
 	return(fits)
 }
 
-allStarFitPSF <- function(procmaps, psfits, bands = names(procmaps$single), maxcomp=1, fits = list())
+allStarFitPSF <- function(procmaps, psfits, bands = names(procmaps$single), maxcomp=1,
+	psselect="auto", fits = list())
 {
 	stopifnot(all(bands %in% names(psfits)))
 	stopifnot(all(bands %in% names(procmaps$maps)))
@@ -462,11 +497,12 @@ allStarFitPSF <- function(procmaps, psfits, bands = names(procmaps$single), maxc
 		bpsfits = psfits[[band]]
 		gain = bmaps$gain_eff
 		pscands = selectFittedPointsources(bpsfits, bproc$brightpsmag, bmaps$hdr,
-			model="moffat1")
-		fits[[band]] = fitPSF(bmaps$img, sigma=bmaps$err, hdr=bmaps$hdr, mask=mask,
+			model="moffat1", select=psselect)
+		fits[[band]] = fitPSF(bmaps$img, sigma=bproc$err, hdr=bmaps$hdr, mask=mask,
 			segim=segim, psfits = bpsfits, pointsources=pscands$ids, means=pscands$means,
 			sds=pscands$sds, init = pscands$means[pscands$best,], skypix=skypix, gain_eff=gain,
-			skybg = 0, maxcomp=maxcomp) #finesample=1L,nthreads=1L, inititer=500, finaliter=2000)
+			skybg = 0, maxcomp=maxcomp, fits = fits[[band]])
+		#finesample=1L,nthreads=1L, inititer=500, finaliter=2000)
 	}
 	return(fits)
 }
@@ -533,7 +569,7 @@ plotfitresiduals <- function(fits, multifit=NULL, fittype="data",
 }
 
 plotSourceFits <- function(bpsfits, procmaps, band, fullfits=list(NULL,NULL),
-	gain_eff=0, profile="moffat", maxcomp=1, plotlims = list(
+	profile="moffat", maxcomp=1, plotlims = list(
 		mag=c(-Inf,20), size = c(-Inf,1), axrat = c(-0.1,0)))
 {
 	fits = bpsfits
@@ -541,13 +577,13 @@ plotSourceFits <- function(bpsfits, procmaps, band, fullfits=list(NULL,NULL),
 	bmaps = procmaps$maps[[band]]
 	bproc = procmaps$proc$single[[band]]
 	fittypes = list(data=FALSE,mock=TRUE)
+	fitname = paste0(profile,maxcomp)
 	varnames = profitGetProfileParamNames(profile)
 	magname = paste0(profile,".mag")
 	xynames = paste0(profile,".",paste0(c("x","y"),"cen"))
 	sizename = paste0(profile,".",varnames$size)
 	for(fittype in names(fittypes)[1])
 	{
-		fitname = paste0(profile,maxcomp)
 		posts = list()
 		for(ifit in 1:length(fits))
 		{
@@ -557,30 +593,30 @@ plotSourceFits <- function(bpsfits, procmaps, band, fullfits=list(NULL,NULL),
 			if(!is.null(gaine))
 			{
 				gainmag = -2.5*log10(gaine)
-				fit$Fit$Posterior1[,magname] = fit$Fit$Posterior1[,magname]-gainmag
+				fit$LDFit$Posterior1[,magname] = fit$LDFit$Posterior1[,magname]-gainmag
 			}
-			rv = NULL
+			rv = list()
 			within = TRUE
 			for(name in names(plotlims))
 			{
 				if(name %in% names(varnames)) varname = varnames[[name]]
 				else varname = name
 				lims = plotlims[[name]]
-				y = fit$Fit$Posterior1[,paste0(profile,".",varname)]
+				y = fit$LDFit$Posterior1[,paste0(profile,".",varname)]
 				if(!any(y >= lims[1] & y <= lims[2])) within=FALSE
 			}
-			post=fit$Fit$Posterior1
+			post=fit$LDFit$Posterior1
 			radec = xy2radec(post[1,xynames[1]],post[1,xynames[2]], header = fit$Data$header)
 			xyoff = radec2xy(radec[,"RA"],radec[,"Dec"],header = bmaps$hdr)-post[1,xynames]
 			post[,xynames] = post[,xynames] + rep(xyoff,each=dim(post)[1])
 
-			if(within) rv = list(post=post, mon=fit$Fit$Monitor)
+			if(within) rv = list(post=post, mon=fit$LDFit$Monitor)
 			posts[[ifit]] = rv
 		}
 		names(posts) = names(fits)
 		for(post in names(posts))
 		{
-			if(is.null(posts[[post]])) posts[[post]] = NULL
+			if(length(posts[[post]]) == 0) posts[[post]] = NULL
 		}
 		segids = as.numeric(names(posts))
 
@@ -617,14 +653,14 @@ plotSourceFits <- function(bpsfits, procmaps, band, fullfits=list(NULL,NULL),
 		best = c()
 		for(post in posts) best = rbind(best,post$post[which.max(post$mon[,"LP"]),])
 		colnames(best) = colnames(posts[[1]]$post)
-		tolog = unlist(fits[[1]]$data$Data$tolog$moffat)
+		tolog = unlist(fits[[1]]$data[[fitname]]$Data$tolog$moffat)
 		varnames = unlist(lapply(strsplit(colnames(best),paste0(profile,".")),function(x) {if(length(x)>1) return(x[[2]])}))
 
 		print(best[1:2,])
 
 		yeqx = c(-1,1)*.Machine$integer.max
 
-		par(mfrow=c(2,2),mar=c(2,2,2,2))
+		par(mfrow=c(2,2),mar=c(2,2,2,2),cex=par("cex"),lwd=par("lwd"))
 		seg = bproc$stats
 		idxs = match(segids,seg[,"segID"])
 		seg = seg[idxs,]
@@ -651,19 +687,20 @@ plotSourceFits <- function(bpsfits, procmaps, band, fullfits=list(NULL,NULL),
 
 		for(i in 1:length(posts))
 		{
-			data = cbind(seg[i,varnames],0)
+			data = seg[i,varnames]
+			if("sky.bg" %in% colnames(best)) data = cbind(data,0)
 			names(data) = colnames(best)
 			# Why is data a list in the first place?! who knows
 			stopifnot(all(is.finite(unlist(data))))
 			plotdata[[paste0("obj_",i)]] = list(sample=4,samptype="nth",
 				data = data[,3:length(data)], pointcol = cmap[i],pty=0,plotsd=FALSE)
 		}
-		gainmag = -2.5*log10(gain_eff)
 		for(ffi in 1:length(fullfits))
 		{
 			fullfit = fullfits[[ffi]]
 			if(!is.null(fullfit))
 			{
+				gainmag = -2.5*log10(fullfit$Data$gain)
 				data = fullfit$LDFit$Posterior1[1:fullfit$LDFit$Iterations,]
 				psfpar = which(startsWith(colnames(data),"psf.") & !endsWith(colnames(data),"box"))
 				psmag = unlist(lapply(strsplit(colnames(data),split = ".mag"), length)) == 2
