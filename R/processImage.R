@@ -57,8 +57,8 @@ proFoundCutouts <- function(maps, plot=FALSE, bands=names(maps))
 	return(proc)
 }
 
-proFoundMultiband <- function(maps, bands=names(maps), plot=FALSE,
-	sky=0, skycut=4, stats=FALSE, tolerance=4, smooth=0, size=7)
+proFoundMultiband <- function(maps, bands=names(maps),
+	...)
 {
 	stopifnot(all(bands %in% names(maps)))
 	nbands = length(bands)
@@ -84,15 +84,13 @@ proFoundMultiband <- function(maps, bands=names(maps), plot=FALSE,
 	}
 	allimg = allimg / sqrt(allvar)
 	allmask = 0+(allmask>0)
-	proc = profoundProFound(image = allimg, mask=allmask, skycut=skycut, stats=stats,
-			tolerance = tolerance, smooth=smooth, size=size, sky=sky, skyRMS = 1, plot=plot,
-			axes=FALSE, mar=rep(0,4))
+	proc = profoundProFound(image = allimg, mask=allmask, axes=FALSE, mar=rep(0,4), ...)
 	return(list(proc=proc,img=allimg, mask=allmask))
 }
 
 # Select point sources that have been fit
 selectFittedPointsources <- function(fits, brightmag, cutoutheader, sigmacut=5, minmag=Inf,
-	model="moffat1")
+	model="moffat1", select="auto")
 {
 	sds = c()
 	bests=c()
@@ -126,10 +124,13 @@ selectFittedPointsources <- function(fits, brightmag, cutoutheader, sigmacut=5, 
 	bestlo = bests - sigmacut*sds
 	besthi = bests + sigmacut*sds
 	probps = which(bests[,"moffat.mag"] < minmag)
-	for(var in paste0("moffat.",c("fwhm","con","axrat")))
+	if(select == "auto")
 	{
-		probps = probps & (bestlo[,var] < smallhi[var]) &
-			(besthi[,var] > smalllo[var])
+		for(var in paste0("moffat.",c("fwhm","con","axrat")))
+		{
+			probps = probps & (bestlo[,var] < smallhi[var]) &
+				(besthi[,var] > smalllo[var])
+		}
 	}
 
 	psids = names(fits)[probps]
@@ -157,16 +158,14 @@ selectSources <- function(stats, minedgedist, dimimg, minmag=20,
 	return(rval)
 }
 
-processImagesMultiband <- function(maps, bands=names(maps), plot=FALSE,
-	sky=0, skycut=4, stats=FALSE, tolerance=4, smooth=0, size=7)
+processImagesMultiband <- function(maps, bands=names(maps), ...)
 {
-	multiproc = proFoundMultiband(maps, bands=bands, plot=plot, sky=sky,
-		skycut=skycut, stats=stats, tolerance=tolerance, smooth=smooth, size=size)
+	multiproc = proFoundMultiband(maps, bands=bands, ...)
 	return(list(multi=multiproc))
 }
 
 processImageSources <- function(maps, minpsmags, brightpsmags,
-	mask, segim, bands=names(maps), fitbands=bands,
+	mask, segim, bands=names(maps), fitbands=bands, pixscale=1,
 	minedgedist=15, addobjerr = TRUE)
 {
 	errcond = (mask==0) & (segim!=0)
@@ -178,7 +177,7 @@ processImageSources <- function(maps, minpsmags, brightpsmags,
 		brightpsmag = brightpsmags[[band]]
 		gain = bmaps$gain_eff
 		stats = profoundSegimStats(image=bmaps$img, segim=segim, skyRMS = bmaps$err,
-			mask = mask, pixscale = 0.2, gain = gain, header = bmaps$hdr)
+			mask = mask, pixscale = pixscale, gain = gain, header = bmaps$hdr)
 		sources = selectSources(stats, minedgedist, dimimg, minmag=minpsmags[[band]],
 			brightpsmag = brightpsmag)
 		rv[[band]]=list(stats=stats, sources=sources, brightpsmag = brightpsmag)
