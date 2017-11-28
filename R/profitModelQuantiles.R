@@ -32,7 +32,13 @@ makeQuantileMaps <- function(image, modelflux=sum(image),
 		{
 			quanticnew = .Internal(findInterval(cumsummed[1:quantic], fluxtarget,
 				FALSE, FALSE, FALSE))
-			quant[sorted$ix[(quanticnew+1):quantic]] = 0
+			fracpix = quanticnew == 0
+			quant[sorted$ix[(quanticnew+1+fracpix):quantic]] = 0
+			if(fracpix)
+			{
+				stopifnot(quant[sorted$ix[1]] >= fluxtarget)
+				quant[sorted$ix[1]] = fluxtarget
+			}
 			if(plot) magimage(quant,stretch="log")
 			quantic = quanticnew
 			rval[[quanti]] = list(map=quant,quantile=quantile)
@@ -80,7 +86,8 @@ measureMapQuantiles <- function(galdata, fitdata, kpcinasec,
 	kindown = 5, alldown = 3, finesample = 6L,
 	kinpixrat=kindown*alldown/finesample,
 	meanvspaxels = 8, spaxscale=0.5, fovradinpix=15,
-	returnmaps=FALSE, fileprefix=NULL, filepostfix=NULL, minkincounts=0)
+	returnmaps=FALSE, fileprefix=NULL, filepostfix=NULL, minkincounts=0,
+	modelpars = NULL)
 {
 	stopifnot(meanvspaxels >= 1)
 	stopifnot(kindown*alldown == kinpixrat*finesample)
@@ -113,13 +120,32 @@ measureMapQuantiles <- function(galdata, fitdata, kpcinasec,
 	if("LDfit" %in% names(fitdata)) names(fitdata)[which(names(fitdata) == "LDfit")] = "LDFit"
 	if(is.demonoid(fitdata$LDFit)) best = getLDFitParm(fitdata = fitdata)
 	else {
-		if(is.null(fitdata$LDFit)) {
+		fit = fitdata$LDFit
+		if(is.null(fit))
+		{
 			stopifnot(!is.null(fitdata$MLFit))
-			best = fitdata$MLFit$par
+			fit = fitdata$MLFit
 		}
-		else best = fitdata$LDFit$par
+		best = list(fit$par)
+		if(is.numeric(fit$rval$x0)) best = c(best,list(fit$rval$x0))
+		lps = numeric(length(best))
+		for(i in 1:length(best))
+		{
+			rv = profitLikeModel(best[[i]], fitdata$Data)
+			best[[i]] = rv$parm
+			lps[i] = rv$LP
+		}
+		best = best[[which.max(lps)]]
 	}
 	stopifnot(is.numeric(best))
+	if(is.numeric(modelpars))
+	{
+		stopifnot(identical(length(modelpars),length(best)))
+		best=modelpars
+	}
+	stopifnot(length(best) == length(fitdata$Data$init))
+	if(is.null(names(best))) names(best) = names(fitdata$Data$init)
+	stopifnot(is.character(names(best)))
 	gain = 1
 	if(!is.null(fitdata$Data$gain)) gain = fitdata$Data$gain
 	fitdim = dim(fitdata$Data$image)
@@ -145,12 +171,40 @@ measureMapQuantiles <- function(galdata, fitdata, kpcinasec,
 		fitdata$Data$region = newdata$region
 
 	}
-	finemodel = profitMakeModelFine(best, fitdata$Data, finesample = finesample)
-	dimfine = dim(finemodel$image)
-	stopifnot(all(dimfine >= kindimrescale))
-	finemodel$image = magcutout(finemodel$image, box=kindimrescale)$image/gain
-
+	finemodel = profitMakeModelFine(best, fitdata$Data)
 	modelflux = sum(10^(-0.4*finemodel$modellist$sersic$mag))/gain
+	converged = FALSE
+	iter = 0
+	while(!converged && (iter <= 3) && all(dimimg*finesample < 1e4))
+	{
+		finemodel = profitMakeModelFine(best, fitdata$Data, finesample = finesample)
+		finemodel$image = finemodel$image/gain
+		converged = sum(finemodel$image)/modelflux > 0.9
+		if(!converged)
+		{
+			fac = 2
+			fitdata$Data$image = matrix(0, fac*dimimg[1], fac*dimimg[2])
+			xynames = paste0("sersic.",paste0(c("x","y"),"cen1"))
+			prevdimimg = dimimg
+			dimimg = dim(fitdata$Data$image)
+			best[xynames] = best[xynames]-prevdimimg/2 + dimimg/2
+			for(var in c("xcen","ycen"))
+			{
+				fitdata$Data$intervals$sersic[[var]] =
+					lapply(fitdata$Data$intervals$sersic[[var]], function(x) { return(fac*x)})
+			}
+		}
+		iter = iter + 1
+		#dimfine = dim(finemodel$image)
+		#stopifnot(all(dimfine >= kindimrescale))
+	}
+	converged = sum(finemodel$image)/modelflux > 0.7
+	#finemodel$image = magcutout(finemodel$image, box=kindimrescale)$image
+	if(!converged)
+	{
+		stopifnot(converged)
+	}
+
 	quantm = makeQuantileMaps(finemodel$image, modelflux = modelflux)
 
 	kinfov = ceiling(profitMakeModel(modellist = list(sersic=list(
@@ -164,14 +218,19 @@ measureMapQuantiles <- function(galdata, fitdata, kpcinasec,
 	print(c(sumpsf=sum(samipsfavg),sumpsffov=sum(samipsfavg[kincond])))
 
 	kinfine = profitDownsample(finemodel$image,kindown)
-	benchconv = profitBenchmarkConv(kinfine, psf=kinpsf)
+	stopifnot(all(dim(kinfine) >= kindim))
+	methods = "FFTWconv"
+	if(prod(c(dim(kinfine),dim(kinpsf))) < 1e9) methods = c("Bruteconv",methods)
+	benchconv = profitBenchmarkConv(kinfine, psf=kinpsf, methods = methods)
 
 	kinconv = profitDownsample(fitfftconvpos(profitConvolvePSF(
 		kinfine, psf=kinpsf, options=benchconv)),alldown)
+	if(any(dim(kinconv) > kindim)) kinconv = magcutout(kinconv,box=kindim)$image
 	print(c(sumkinconv=sum(kinconv),sumkinconvfov=sum(kinconv[kincond]))/modelflux)
 
 	censpax = sort(kinconv, decreasing=TRUE, index.return=TRUE)$ix[1:meanvspaxels]
 	meanv = mean(kinconv[censpax]*kinmaps$v[censpax]/sum(kinconv[censpax]))
+	stopifnot(is.finite(meanv))
 	# Recenter
 	kinmaps$v = kinmaps$v - meanv
 	vabs = abs(kinmaps$v)
@@ -194,10 +253,17 @@ measureMapQuantiles <- function(galdata, fitdata, kpcinasec,
 	{
 		quantmap=quantm[[quantn]]$map
 		quantfine = profitDownsample(quantmap,kindown)
+
+		dimfine = dim(quantfine)
+		edgy = any(quantfine[1,] > 0)
+		if(!edgy) edgy = any(quantfine[dimfine[1],] > 0)
+		if(!edgy) edgy = any(quantfine[,1] > 0)
+		if(!edgy) edgy = any(quantfine[,dimfine[1]] > 0)
+
 		npix = sum(quantmap>0)/kindown^2
 		quantconv = profitDownsample(fitfftconvpos(profitConvolvePSF(
 			quantfine, psf=kinpsf, options=benchconv)),alldown)
-		quantconvfov = quantconv*kincond
+		quantconvfov = magcutout(quantconv,box=dim(kincond))$image*kincond
 		sumquantconv=sum(quantconv)
 		sumquantconvfov=sum(quantconvfov)
 		sumquantrat = sumquantconvfov/sumquantconv
@@ -224,8 +290,9 @@ measureMapQuantiles <- function(galdata, fitdata, kpcinasec,
 			lquant=sum(quantmap),
 			quantratio = sumquantrat,
 			quantile=quantm[[quantn]]$quantile,
-			r = sqrt(npix/pi)*kpcperpix,
-			ell = 1-stats[,"axrat"]
+			r = sqrt(npix/pi)*kpcperpix/finesample,
+			ell = 1-stats[,"axrat"],
+			hitedgeflag=edgy
 		)
 		if(returnmaps)
 		{
