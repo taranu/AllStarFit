@@ -895,16 +895,20 @@ profitFitGalaxyComponents <- function(image, sigma, psfim,
 		psflo = profitDownsample(psfim,finesample)
 	}
 
-	convmethods = "FFTWconv"
-	if(prod(dim(image),dim(psflo)) < 1e8) convmethods = c(convmethods,"Bruteconv")
+	convmethods = "fft"
+	if(prod(dim(image),dim(psflo)) < 1e8) convmethods = c(convmethods,"brute")
+	if(profitHasOpenCL()) convmethods = c(convmethods,"opencl")
+	openclenvs = profitGetOpenCLEnvs(make.envs=TRUE)
 
 	Data=profitSetupData(image, sigma=sigma, region=region,
 		modellist=lists$modellist, tofit=lists$tofit,
 		tolog=lists$tolog, intervals=lists$intervals,
 		psf=psflo, finesample = 1L,
 		priors=lists$priors, algo.func='LD',like.func="norm",
-		nbenchmarkconv = 3L, benchmarkconvmethods = convmethods,
-		verbose=FALSE, omp_threads = nthreads
+		nbenchmark = 3L, benchconvmethods = convmethods,
+		benchintmethods = profitAvailableIntegrators(),
+		verbose=FALSE, omp_threads = nthreads,
+		benchopenclenvs = openclenvs
 	)
 	Data$gain = gain_eff
 	Data$mon.names = c(Data$mon.names, chisq="chisq")
@@ -976,8 +980,10 @@ profitFitGalaxyComponents <- function(image, sigma, psfim,
 				tofit=lists$tofit, tolog=lists$tolog, intervals=lists$intervals,
 				psf=psflo, finesample = 1L,
 				priors=lists$priors, algo.func='LD',like.func="norm",
-				nbenchmarkconv = 3L, benchmarkconvmethods = convmethods,
-				verbose=FALSE, omp_threads = nthreads
+				nbenchmark = 3L, benchconvmethods = convmethods,
+				benchintmethods = profitAvailableIntegrators(),
+				verbose=FALSE, omp_threads = nthreads,
+				benchopenclenvs = openclenvs
 			)
 			init = Data$init
 			Data$mon.names = c(Data$mon.names, chisq="chisq")
@@ -1009,9 +1015,6 @@ profitFitGalaxyComponents <- function(image, sigma, psfim,
 		}
 	}
 	initpars = c("mag","re","axrat","ang","nser")
-
-	convmethods = "FFTWconv"
-	if(prod(dim(image),dim(psfim)) < 1e8) convmethods = c(convmethods,"Bruteconv")
 
 	# Do at least a B/D decomposition (even if single Sersic is ok) and add more components if not
 	while(((chisqredgal/chisqrtarg > chisqrminratio) || ncomp < 2) && ncomp < maxcomp)
@@ -1083,9 +1086,11 @@ profitFitGalaxyComponents <- function(image, sigma, psfim,
 				modellist=lists$modellist, tofit=lists$tofit,
 				tolog=lists$tolog, intervals=lists$intervals, psf=psfim,
 				priors=lists$priors, algo.func='LD',like.func="norm",
-				nbenchmarkconv = 3L, benchmarkconvmethods = convmethods,
+				nbenchmark = 3L, benchconvmethods = convmethods,
+				benchintmethods = profitAvailableIntegrators(),
 				verbose=FALSE, omp_threads = nthreads,
-				finesample=finesample, psffinesampled = TRUE)
+				finesample=finesample, psffinesampled = TRUE,
+				benchopenclenvs = openclenvs)
 			Data$parm.names = names(Data$init)
 			Data$mon.names = c(Data$mon.names, chisq="chisq")
 			Data$gain = gain_eff
@@ -1200,10 +1205,11 @@ profitFitGalaxyComponents <- function(image, sigma, psfim,
 					modellist=lists$modellist, tofit=lists$tofit,
 					tolog=lists$tolog, intervals=lists$intervals, psf=psfim,
 					priors=lists$priors, algo.func='LD',like.func="norm",
-					nbenchmarkconv = 3L, benchmarkconvmethods = convmethods,
+					nbenchmark = 3L, benchconvmethods = convmethods,
+					benchintmethods = profitAvailableIntegrators(),
 					verbose=FALSE, omp_threads = nthreads,
 					finesample=finesample, psffinesampled = TRUE,
-					constraints = constraints)
+					constraints = constraints, benchopenclenvs = openclenvs)
 				newData$tolog$brokenexp$rb = TRUE
 				newData$mon.names = c(newData$mon.names, chisq="chisq")
 				newData$gain = gain_eff

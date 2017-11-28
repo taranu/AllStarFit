@@ -439,10 +439,11 @@ makeModelSegmap <- function(process, psffit, galfits=NULL,
 
 		lists = combineProfitLists(list(psf=psflists, pointsource=pslists, sersic=sersiclists))
 
+		# Update, eventually
 		Data = profitSetupData(image=image,sigma = sigma, mask=mask, psf=psfim,
 			modellist = lists$modellist, tofit = lists$tofit, tolog=lists$tolog, intervals = lists$intervals,
 			priors=lists$priors, algo.func="CMA", like.func="norm", verbose=FALSE, omp_threads=1,
-			nbenchmarkconv = 1L, benchmarkconvmethods = c("FFTconv","FFTWconv"))
+			nbenchmark = 1L)
 		#profitLikeModel(Data$init, Data, makeplots = T, plotchisq = T)
 
 		mlfit = mlFit(Data, maxiter=250, algo.func="CMA", cmathreads=nthreads, tolerance=0.1)
