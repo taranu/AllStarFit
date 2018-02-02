@@ -38,6 +38,31 @@ profitGetExtraDefaults <- function(profile)
 	return(extraparams)
 }
 
+profitGetExtraIntervalDefaults <- function(profile)
+{
+	extraparams = c()
+	if(profile == "brokenexp")
+	{
+		extraparams = c(a=list(lim=c(0,1e10)),rb=list(lim=c(0,1e10)))
+	}
+	else if(profile == "coresersic")
+	{
+		extraparams = c(a=0,b=0,rb=0)
+	}
+	else if(profile == "ferrer" || profile == "ferrers")
+	{
+		extraparams = c(b=0)
+	}
+	else if((profile == "moffat") || (profile == "pointsource") || (profile == "sersic"))
+	{
+	}
+	else
+	{
+		stop(paste0("Unknown profile=['",profile,"']; aborting."))
+	}
+	return(extraparams)
+}
+
 profitRepExtra <- function(profile, values=profitGetExtraDefaults(profile), nrep=1)
 {
 	extraparams = list()
@@ -261,13 +286,17 @@ profitMakeLists <- function(xcen=0, ycen=0, mag=0, size=0, slope=0,
 	samemeans = all(1==unlist(lapply(means,length)))
 	stopifnot(indmeans || samemeans)
 
+	# This is hideous :(((
 	if(samelims)
 	{
 		alllims = list(xcen=c(xmin,xmax),ycen=c(ymin,ymax),mag=c(magmin,magmax),size=c(sizemin,sizemax),
 			slope=c(slopemin,slopemax), ang=c(angmin,angmax), axrat=c(axratmin,axratmax), box=c(boxmin,boxmax))
 		alllims = lapply(alllims, function(x) { return(rep(list(lim=x),ncomp))})
+		extralims = list()
+		for(name in names(extramin)) extralims[[name]] = c(extramin[[name]],extramax[[name]])
 		intervals = list(profitMakeList(xcen=alllims$xcen, ycen=alllims$ycen, mag=alllims$mag, size=alllims$size,
-			slope=alllims$slope,ang=alllims$ang, axrat=alllims$axrat, box=alllims$box,profile=profile,ispsf=ispsf))
+			slope=alllims$slope,ang=alllims$ang, axrat=alllims$axrat, box=alllims$box,profile=profile,ispsf=ispsf,
+			extraparams = lapply(extralims, function(x) { return(rep(list(lim=x),ncomp))})))
 		names(intervals) = profile
 	} else {
 		stop("Independent parameter limits not supported yet")
@@ -368,10 +397,11 @@ profitCombineLists <- function(lists)
 
 mlFit <- function(Data, init=Data$init, maxeval=1000, maxiter=100, algo.func="NEWUOA",
 	cmasigma = formals(Data$priors)$sigmas[formals(Data$priors)$tofit], cmathreads=1,
-	tolerance=1e-3, ftol_rel=0, maxwalltime = Inf)
+	tolerance=1e-3, ftol_rel=1e-3, maxwalltime = Inf)
 {
 	stopifnot(is.numeric(maxwalltime))
 	if(maxwalltime <= 0) maxwalltime = 1e-10
+	tfinal = timeinmins() + maxwalltime
 	algos = c("NEWUOA","BOBYQA","HAR","LM","NM","SPG")
 	stopifnot(algo.func %in% algos || algo.func == "CMA")
 
@@ -390,13 +420,15 @@ mlFit <- function(Data, init=Data$init, maxeval=1000, maxiter=100, algo.func="NE
   	lims[[lim]] = lims[[lim]][whichfit]
   }
 
-	isnewuoa = algo.func == "NEWUOA"
-	isbobyqa = algo.func == "BOBYQA"
-	if(isnewuoa || isbobyqa)
+  isnlopt = algo.func %in% c("NEWUOA","BOBYQA", "NM")
+	if(isnlopt)
 	{
+		if(identical(algo.func,"NM")) algo.func = "NELDERMEAD"
+		else if(identical(algo.func,"NEWUOA")) algo.func = "NEWUOA_BOUND"
 		rv = list(rval=nloptr(x0 = init, eval_f=function(...) {return(-profitLikeModel(...)$LP)},
 			opts = list(algorithm=paste0("NLOPT_LN_",algo.func),maxtime=maxwalltime*60,
-			maxeval=maxeval,ftol_rel=ftol_rel), Data=Data))
+			maxeval=maxeval,xtol_rel=0,ftol_abs=ftol_rel), lb=lims$lower, ub = lims$upper,
+			Data=Data))
 		rv$value = -rv$rval$objective
 		rv$par = rv$rval$solution
 		rv$rval$eval_f = get("eval_f",envir = environment(rv$rval$eval_f))
@@ -417,6 +449,7 @@ mlFit <- function(Data, init=Data$init, maxeval=1000, maxiter=100, algo.func="NE
 			Iterations=maxiter, Method=algo.func, CovEst = "Identity",
 			MaxWalltime = maxwalltime, sir=FALSE, CheckDataMatrixRanks = FALSE))
 	}
+  rv$overtime = exceededmaxtime(timeinmins(),tfinal)
 	return(rv)
 }
 
@@ -553,8 +586,7 @@ convergeFit <- function(Data, init=Data$init, initalg = "CHARM", initspecs = lis
 	domlfit = TRUE, domcmc = TRUE, docma = FALSE, cmasigma = NULL, cmasigmamult = c(2,1,0.5),
 	cmatolfrac =0.05, cmaiter=inititer,	cmaresetmaxruns = TRUE, maxwalltime=Inf)
 {
-	tinit = timeinmins()
-	tfinal = tinit + maxwalltime
+	tfinal = timeinmins() + maxwalltime
 	overtime = FALSE
 	bestLP = profitLikeModel(init,Data,makeplots = F)$LP
 	converged = FALSE
@@ -578,15 +610,13 @@ convergeFit <- function(Data, init=Data$init, initalg = "CHARM", initspecs = lis
 	}
 	if(domlfit)
 	{
-		algofuncs = c("NEWUOA","BOBYQA")
+		algofuncs = c("NEWUOA","BOBYQA","NM")
 		fits = list()
 		for(func in algofuncs)
 		{
-			tinit = timeinmins()
 			fits[[func]] = mlFit(Data, init = init, maxeval=maxeval, algo.func=func,
-				maxwalltime = tfinal-tinit)
-			overtime = exceededmaxtime(tinit,tfinal)
-			if(overtime) break
+				maxwalltime = tfinal-timeinmins())
+			if(fits[[func]]$overtime) break
 		}
 		best = which.max(unlist(lapply(fits, function(x) { x$value })))
 		fit = fits[[best]]
@@ -596,16 +626,13 @@ convergeFit <- function(Data, init=Data$init, initalg = "CHARM", initspecs = lis
 		print(sprintf(paste0("Got bestfunc: ",mlfunc,"; value: %.6e; par:"),bestLP))
 		print(init)
 	}
+	overtime = exceededmaxtime(timeinmins(),tfinal)
 	while(!converged && !overtime)
 	{
-		tinit = timeinmins()
-		overtime = exceededmaxtime(tinit,tfinal)
-		if(overtime) break
 		if(domlfit)
 		{
-			tinit = timeinmins()
-			fit = mlFit(Data, init = init, algo.func = mlfunc, maxeval = maxeval, ftol_rel = ftol_rel,
-				maxwalltime = tfinal-tinit)
+			fit = mlFit(Data, init = init, algo.func = mlfunc, maxeval = maxeval,
+				ftol_rel = ftol_rel, maxwalltime = tfinal-timeinmins())
 			newLP = fit$value
 			if(newLP > bestLP)
 			{
@@ -618,16 +645,21 @@ convergeFit <- function(Data, init=Data$init, initalg = "CHARM", initspecs = lis
 		}
 		else
 		{
-			tinit = timeinmins()
-			fit = mlFit(Data=Data, init=init, maxiter=inititer, algo.func="HAR", maxwalltime=tfinal-tinit)
+			fit = mlFit(Data=Data, init=init, maxiter=inititer, algo.func="HAR",
+				maxwalltime=tfinal-timeinmins())
 			newLP = fit$value
 			if(newLP > bestLP) init = fit$par
 		}
 		run = run + 1
 		converged = (newLP - bestLP) < exp(1) || (run >= maxruns)
-		tinit = timeinmins()
-		overtime = exceededmaxtime(tinit,tfinal)
-		if(overtime) break
+		if(fit$overtime) break
+		# Double check convergence if not using NM
+		if(converged && !(domlfit && mlfunc == "NM"))
+		{
+			converged = FALSE
+			domlfit = TRUE
+			mlfunc = "NM"
+		}
 		if(converged)
 		{
 			if(newLP > bestLP) bestLP = newLP
@@ -641,23 +673,23 @@ convergeFit <- function(Data, init=Data$init, initalg = "CHARM", initspecs = lis
 				for(mult in cmasigmamult)
 				{
 					# TODO: replace with MLFit call
-					tinit = timeinmins()
 					fit = cmaeshpc(init, profitLikeModel, Data=Data, control=list(
 			    	maxit=cmaiter, fnscale=-1.0, sigma=mult*cmasigma,
 			    	diag.sigma=TRUE, diag.eigen=TRUE, diag.pop=TRUE, diag.value=TRUE,
-			    	maxwalltime=tfinal-tinit,	trace=TRUE, stopfitness = Inf,
+			    	maxwalltime=tfinal-timeinmins(),	trace=TRUE, stopfitness = Inf,
 			    	stop.tolx=cmatolfrac*mult*cmasigma,
 			    	lower = lims$lower, upper=lims$upper))
 					if((fit$value - bestLP) > exp(1))
 					{
 						converged = FALSE
-						init = profitRemakeModellist(fit$par, Data=Data)$parm
+						fit$par = profitRemakeModellist(fit$par, Data=Data)$parm
+						init = fit$par
 						bestLP = fit$value
 						print(sprintf(paste0("CMA converged at value: %.6e; par:"),bestLP))
 						print(init)
 						if(cmaresetmaxruns) run = 0
 					} else docma = FALSE
-					overtime = exceededmaxtime(tinit,tfinal)
+					overtime = exceededmaxtime(timeinmins(),tfinal)
 					if(overtime) break
 				}
 				Data$algo.func = algofunc
@@ -666,10 +698,9 @@ convergeFit <- function(Data, init=Data$init, initalg = "CHARM", initspecs = lis
 			{
 				print(paste0("LD convergence starting with params: c(",paste0(sprintf("%.6f",init),collapse=","),")"))
 				# See if HARM can find a better solution
-				tinit = timeinmins()
 				fit = LaplacesDemon(profitLikeModel, Initial.Values=init, Data=Data, Iterations=inititerharm,
 					Algorithm="HARM", Thinning=1, Specs=list(alpha.star=0.234, B=NULL),
-					CheckDataMatrixRanks=FALSE, MaxWalltime=tfinal-tinit)
+					CheckDataMatrixRanks=FALSE, MaxWalltime=tfinal-timeinmins())
 				best = which.max(fit$Monitor[,"LP"])
 				newLP = fit$Monitor[best,"LP"]
 				converged = (newLP - bestLP) < exp(1)
@@ -678,7 +709,7 @@ convergeFit <- function(Data, init=Data$init, initalg = "CHARM", initspecs = lis
 					init = fit$Posterior1[best,]
 					bestLP = newLP
 				}
-				overtime = exceededmaxtime(tinit,tfinal)
+				overtime = exceededmaxtime(timeinmins(),tfinal)
 				if(overtime) break
 				# If it's still converged, test it out with the final algorithm; otherwise try ML/CMA again
 				if(converged)
@@ -686,10 +717,9 @@ convergeFit <- function(Data, init=Data$init, initalg = "CHARM", initspecs = lis
 					print(paste0("LD MCMC starting with params: c(",paste0(sprintf("%.6f",init),collapse=","),")"))
 					if(finalalg != "HARM")
 					{
-						tinit = timeinmins()
 						fit = LaplacesDemon(profitLikeModel, Initial.Values=init, Data=Data, Iterations=inititermcmc,
 							Algorithm=finalalg, Thinning=1, Specs=finalspecs, CheckDataMatrixRanks=FALSE,
-							MaxWalltime=tfinal-tinit)
+							MaxWalltime=tfinal-timeinmins())
 						best = which.max(fit$Monitor[,"LP"])
 						newLP = fit$Monitor[best,"LP"]
 					}
@@ -699,16 +729,15 @@ convergeFit <- function(Data, init=Data$init, initalg = "CHARM", initspecs = lis
 						init = fit$Posterior1[best,]
 						bestLP = newLP
 					}
-					overtime = exceededmaxtime(tinit,tfinal)
+					overtime = exceededmaxtime(timeinmins(),tfinal)
 					if(overtime) break
 					# If a test run of the final algorithm is still converged, go for it
 					# Usually we don't want to use the final algorithm for convergence if it's e.g. CHARM vs HARM
 					if(converged)
 					{
-						tinit = timeinmins()
 						fit = LaplacesDemon(profitLikeModel, Initial.Values=init, Data=Data, Iterations=finaliter,
 							Algorithm=finalalg, Thinning=1, Specs=finalspecs, CheckDataMatrixRanks=FALSE,
-							MaxWalltime=tfinal-tinit)
+							MaxWalltime=tfinal-timeinmins())
 						best = which.max(fit$Monitor[,"LP"])
 						newLP = fit$Monitor[best,"LP"]
 						# Need to rerun if the final MCMC run wasn't converged (i.e. still needed burn-in)
@@ -718,7 +747,7 @@ convergeFit <- function(Data, init=Data$init, initalg = "CHARM", initspecs = lis
 							init = fit$Posterior1[best,]
 							bestLP = newLP
 						}
-						overtime = exceededmaxtime(tinit,tfinal)
+						overtime = exceededmaxtime(timeinmins(),tfinal)
 						if(overtime) break
 					}
 					print(paste0("LD MCMC finished (converged=",converged,") with params: c(",paste0(sprintf("%.6f",init),collapse=","),")"))
@@ -726,10 +755,10 @@ convergeFit <- function(Data, init=Data$init, initalg = "CHARM", initspecs = lis
 			}
 		}
 		if(newLP > bestLP) bestLP = newLP
+		overtime = exceededmaxtime(timeinmins(),tfinal)
 	}
 	if(!exists("fit"))
 	{
-
 		fit = list(par=init)
 		Data$algo.func="LD"
 		fit$value = profitLikeModel(fit$par,Data=Data)$LP
@@ -741,6 +770,7 @@ convergeFit <- function(Data, init=Data$init, initalg = "CHARM", initspecs = lis
 		fit$par = init
 		fit$value = bestLP
 	}
+	fit$par = profitRemakeModellist(fit$par, Data=Data)$parm
 	return(fit)
 }
 
@@ -842,6 +872,14 @@ makeProfitSingleSourceLists <- function(profile = "sersic", x, y,
 
 # A big messy code to do multi-component fits to a galaxy, (vaguely) intelligently
 # adding components. Consider it an experimental first pass.
+
+# Yes, I'm aware there's lots of repetition and copypasta here, and that's bad.
+# It all needs to be refactored at some point. Probably what we need is some
+# kind of "source" class that can be an arbitrary combination of components
+# linked by a common centre. Perhaps components should be named so it's
+# easy to switch the disk from Sersic to broken exponential, bar from
+# Sersic to Ferrers, etc.
+
 profitFitGalaxyComponents <- function(image, sigma, psfim,
 	segim=matrix(0,dim(image)[1],dim(image)[2]), maxcomp=2,
 	segobjs = c(0), gain_eff=1, chisqrtarg=1, chisqrminratio=1.05,
@@ -850,10 +888,10 @@ profitFitGalaxyComponents <- function(image, sigma, psfim,
 		slope=2.5, ang=0, axrat=1), skylevel = 0, skyRMS = median(sigma,na.rm = TRUE),
 	nthreads=1, maxiter=1e3, maxruns=Inf, domcmc=TRUE, finesample=1L,
 	psffine=finesample>1L, autocrop=FALSE, adddiskfirst=TRUE, dobrokenexp=FALSE,
-	galfit=NULL, maxwalltime=Inf)
+	galfit=NULL, maxwalltime=Inf, openclenvs = profitGetOpenCLEnvs(make.envs=TRUE),
+	precisions=c("double"))
 {
-	tinit = timeinmins()
-	tfinal = tinit+maxwalltime
+	tfinal = timeinmins() + maxwalltime
 	dimimg = dim(image)
 
 	if(any(segim != 0))
@@ -870,7 +908,7 @@ profitFitGalaxyComponents <- function(image, sigma, psfim,
 		ang = init$ang, axrat = init$axrat, xmin = 0,
 		xmax=dimimg[2], ymax=dimimg[2],
 		magmin = maginit-5, magmax=maginit+5,
-		sizemin = 0.01,sizemax=10*dimimg[1],
+		sizemin = 0.01, sizemax=5*sqrt(prod(dimimg))/2,
 		slopemin = 0.1, slopemax=20, axratmin=0.02, axratmax=1, addsky = TRUE,
 		skybg = skylevel*gain_eff, fitsky = FALSE, xsd=2, ysd=2, magsd=0.5,
 		skybgsd = skyRMS*gain_eff
@@ -878,9 +916,6 @@ profitFitGalaxyComponents <- function(image, sigma, psfim,
 	lists = siglists$lists
 
 	#lists$intervals$sky = list(bg=list(lim=skylevel+skyRMS*c(-5,5)))
-
-	rm(Data)
-	gc()
 	psflo = psfim
 	if(finesample > 1L)
 	{
@@ -898,7 +933,6 @@ profitFitGalaxyComponents <- function(image, sigma, psfim,
 	convmethods = "fft"
 	if(prod(dim(image),dim(psflo)) < 1e8) convmethods = c(convmethods,"brute")
 	if(profitHasOpenCL()) convmethods = c(convmethods,"opencl")
-	openclenvs = profitGetOpenCLEnvs(make.envs=TRUE)
 
 	Data=profitSetupData(image, sigma=sigma, region=region,
 		modellist=lists$modellist, tofit=lists$tofit,
@@ -907,6 +941,7 @@ profitFitGalaxyComponents <- function(image, sigma, psfim,
 		priors=lists$priors, algo.func='LD',like.func="norm",
 		nbenchmark = 3L, benchconvmethods = convmethods,
 		benchintmethods = profitAvailableIntegrators(),
+		benchprecisions = precisions,
 		verbose=FALSE, omp_threads = nthreads,
 		benchopenclenvs = openclenvs
 	)
@@ -931,13 +966,11 @@ profitFitGalaxyComponents <- function(image, sigma, psfim,
 	}
 	if(!complete)
 	{
-		tinit = timeinmins()
 		mlfit = convergeFit(Data, inititer = maxiter/4,	domcmc = FALSE, maxruns = maxruns,
-			maxwalltime = tfinal-tinit)
-		overtime = exceededmaxtime(tinit,tfinal)
+			maxwalltime = tfinal-timeinmins())
 		if(!is.null(Data$convopt$fft$fftwplan)) Data$convopt$fft$fftwplan = NULL
-		galfit$data$ser_frpa_init = list(Data=Data,MLFit=mlfit,MLDone=!overtime,DoMCMC=FALSE)
-		if(overtime) return(galfit)
+		galfit$data$ser_frpa_init = list(Data=Data,MLFit=mlfit,MLDone=!mlfit$overtime,DoMCMC=FALSE)
+		if(mlfit$overtime) return(galfit)
 	}
 	init = mlfit$par
 	names(init) = names(Data$init)
@@ -982,6 +1015,7 @@ profitFitGalaxyComponents <- function(image, sigma, psfim,
 				priors=lists$priors, algo.func='LD',like.func="norm",
 				nbenchmark = 3L, benchconvmethods = convmethods,
 				benchintmethods = profitAvailableIntegrators(),
+				benchprecisions = precisions,
 				verbose=FALSE, omp_threads = nthreads,
 				benchopenclenvs = openclenvs
 			)
@@ -1004,14 +1038,11 @@ profitFitGalaxyComponents <- function(image, sigma, psfim,
 		}
 		if(!complete)
 		{
-			tinit = timeinmins()
 			mlfit = convergeFit(Data, init = mlfit$par, inititer = maxiter/4,
-				domcmc = TRUE,	maxruns = 50, maxwalltime = tfinal-tinit)
-			tinit = timeinmins()
-			overtime = exceededmaxtime(tinit,tfinal)
+				domcmc = TRUE,	maxruns = 50, maxwalltime = tfinal-timeinmins())
 			if(!is.null(Data$convopt$fft$fftwplan)) Data$convopt$fft$fftwplan = NULL
 			galfit$data[[modelname]] = list(Data=Data,MLFit=mlfit,Complete=!overtime,DoMCMC=TRUE)
-			if(overtime) return(galfit)
+			if(mlfit$overtime) return(galfit)
 		}
 	}
 	initpars = c("mag","re","axrat","ang","nser")
@@ -1057,7 +1088,7 @@ profitFitGalaxyComponents <- function(image, sigma, psfim,
 			inits$nser = c(0.4+!adddisk*inits$nser, 0+0.3*!adddisk)
 			inits$nser[inits$nser > 0.6] = 0.6
 			inits$nser[inits$nser < -0.6] = -0.6
-			inits$ang = c(inits$ang, inits$ang[ncomp-1]+90*!adddisk)
+			inits$ang = c(inits$ang, inits$ang[ncomp-1]+90*!adddisk) %% 360
 			for(initpar in c("re","axrat","nser")) inits[[initpar]] = 10^inits[[initpar]]
 
 			postfix = ""
@@ -1069,7 +1100,7 @@ profitFitGalaxyComponents <- function(image, sigma, psfim,
 				mag = inits$mag, size = inits$re, slope = inits$nser,
 				ang = inits$ang, axrat = inits$axrat, box = rep(0,ncomp),
 				xmin = 0, xmax=dimimg[1], ymax=dimimg[2],
-				sizemin = max(0.02,0.1/finesample), sizemax = sqrt(prod(dimimg))/2,
+				sizemin = max(0.02,0.1/finesample), sizemax = 5*sqrt(prod(dimimg))/2,
 				slopemin = 0.1, slopemax=20, axratmin=0.02, axratmax=1,
 				magmin = min(inits$mag)-25, magmax=max(inits$mag)+25,
 				fitx = c(TRUE, rep(NA,ncomp-1)), fitmag = alltrue,
@@ -1088,12 +1119,29 @@ profitFitGalaxyComponents <- function(image, sigma, psfim,
 				priors=lists$priors, algo.func='LD',like.func="norm",
 				nbenchmark = 3L, benchconvmethods = convmethods,
 				benchintmethods = profitAvailableIntegrators(),
+				benchprecisions = precisions,
 				verbose=FALSE, omp_threads = nthreads,
 				finesample=finesample, psffinesampled = TRUE,
 				benchopenclenvs = openclenvs)
 			Data$parm.names = names(Data$init)
 			Data$mon.names = c(Data$mon.names, chisq="chisq")
 			Data$gain = gain_eff
+			if(finesample > 1L)
+			{
+				Data$lo=profitSetupData(image, sigma=sigma, region=region,
+					modellist=lists$modellist, tofit=lists$tofit,
+					tolog=lists$tolog, intervals=lists$intervals, psf=psflo,
+					priors=lists$priors, algo.func='LD',like.func="norm",
+					nbenchmark = 3L, benchconvmethods = convmethods,
+					benchintmethods = profitAvailableIntegrators(),
+					benchprecisions = precisions,
+					verbose=FALSE, omp_threads = nthreads,
+					finesample=1L,
+					benchopenclenvs = openclenvs)
+				Data$lo$parm.names = names(Data$lo$init)
+				Data$lo$mon.names = c(Data$lo$mon.names, chisq="chisq")
+				Data$lo$gain = gain_eff
+			}
 		} else {
 			Data = galfit$data[[modelname]]$Data
 		}
@@ -1108,24 +1156,65 @@ profitFitGalaxyComponents <- function(image, sigma, psfim,
 			}
 			if(!complete)
 			{
-				tinit = timeinmins()
-				mlfit = convergeFit(Data, inititer = maxiter/4, domcmc = FALSE, maxruns = maxruns,
-					maxwalltime = tfinal-tinit)
-				overtime = exceededmaxtime(tinit,tfinal)
-				# Try reversing component mags again
+				if(!isnull)
+				{
+					benchmarks = profitDataBenchmark(
+						modellist = Data$modellist, calcregion = Data$calcregion,
+						imgdim = dim(Data$image), finesample = Data$finesample, psf=Data$psf, fitpsf = FALSE,
+						omp_threads = nthreads, nbenchmark = 3L, benchconvmethods = convmethods,
+						benchintmethods = profitAvailableIntegrators(), benchprecisions = precisions,
+						benchopenclenvs = openclenvs)
+					Data = profitDataSetOptionsFromBenchmarks(Data, benchmarks)
+					if(finesample > 1L)
+					{
+						benchmarks = profitDataBenchmark(
+							modellist = Data$lo$modellist, calcregion = Data$lo$calcregion,
+							imgdim = dim(Data$lo$image), finesample = Data$lo$finesample, psf=Data$lo$psf, fitpsf = FALSE,
+							omp_threads = nthreads, nbenchmark = 3L, benchconvmethods = convmethods,
+							benchintmethods = profitAvailableIntegrators(), benchprecisions = precisions,
+							benchopenclenvs = openclenvs)
+						Data$lo = profitDataSetOptionsFromBenchmarks(Data$lo, benchmarks)
+					}
+				}
+				if(finesample > 1L)
+				{
+					mlfitf = convergeFit(Data$lo, inititer = maxiter/4, domcmc = FALSE,
+															maxruns = maxruns, maxwalltime = tfinal-timeinmins())
+					Data$init = mlfitf$par
+				}
+				overtime = exceededmaxtime(timeinmins(),tfinal)
 				if(!overtime)
 				{
-					whichmag = which(startsWith(names(Data$init),"sersic.mag"))
-					init = mlfit$par
-					init[whichmag] = rev(init[whichmag])
-					mlfitnew = convergeFit(Data, init=init, inititer = maxiter/4, domcmc = FALSE,
-						maxruns = maxruns, maxwalltime = tfinal-tinit)
-					if(mlfitnew$value > mlfit$value)
+					mlfit = convergeFit(Data, inititer = maxiter/4, domcmc = FALSE, maxruns = maxruns,
+						maxwalltime = tfinal-timeinmins())
+					# Try reversing component mags again
+					if(!mlfit$overtime)
 					{
-						mlfit = mlfitnew
-						Data$init = init
+						whichmag = which(startsWith(names(Data$init),"sersic.mag"))
+						init = mlfit$par
+						init[whichmag] = rev(init[whichmag])
+						if(finesample > 1L)
+						{
+							initf = mlfitf$par
+							initf[whichmag] = rev(initf[whichmag])
+							mlfitnew = convergeFit(Data$lo, init=mlfit$par, inititer = maxiter/4, domcmc = FALSE,
+								maxruns = maxruns, maxwalltime = tfinal-timeinmins())
+							if((mlfitnew$value > mlfitf$value) && !mlfitnew$overtime)
+							{
+								mlfitnew = convergeFit(Data, init = mlfitnew$par, inititer = maxiter/4, domcmc = FALSE,
+									maxruns = maxruns, maxwalltime = tfinal-timeinmins())
+							}
+						} else {
+							mlfitnew = convergeFit(Data, init=init, inititer = maxiter/4, domcmc = FALSE,
+								maxruns = maxruns, maxwalltime = tfinal-timeinmins())
+						}
+						if(mlfitnew$value > mlfit$value)
+						{
+							mlfit = mlfitnew
+							Data$init = init
+						}
+						overtime = exceededmaxtime(timeinmins(),tfinal)
 					}
-					overtime = exceededmaxtime(tinit,tfinal)
 				}
 				if(!is.null(Data$convopt$fft$fftwplan)) Data$convopt$fft$fftwplan = NULL
 				galfit$data[[modelname]] = list(Data=Data,MLFit=mlfit,MLDone=!overtime,DoMCMC=FALSE)
@@ -1141,86 +1230,139 @@ profitFitGalaxyComponents <- function(image, sigma, psfim,
 			complete = !is.null(galfit$data[[bexpname]]) &&
 				!is.null(galfit$data[[bexpname]]$MLDone) &&
 				galfit$data[[bexpname]]$MLDone
-			if(!complete)
+			if(complete)
 			{
-				if(!is.null(galfit$data$ser_fipa_2$LDFit)) best = getLDFitBest(galfit$data$ser_fipa_2)
-				else {
+				newData = galfit$data[[bexpname]]$Data
+			}
+			else
+			{
+				if(is.null(galfit$data[[bexpname]]$Data))
+				{
 					best = galfit$data$ser_fipa_2$MLFit$par
-					names(best) = names(galfit$data$ser_fipa_2$Data$init)
 				}
-				names(best) = unlist(lapply(names(best), function(x) { return(substr(x,8,nchar(x)))}))
-				mag = -2.5*log10(sum(10^(-0.4*best["mag1"])+10^(-0.4*best["mag2"])))
-				siglistsbexpb = makeProfitSingleSourceLists(profile = "sersic",
-					x=unname(best["xcen1"]), y=unname(best["ycen1"]), mag = unname(best["mag1"]),
-					size = unname(best["re1"]), slope = unname(best["nser1"]), ang=unname(best["ang1"]),
-					axrat = unname(best["axrat1"]), box=0, xmin = 0, xmax=dimimg[1], ymax=dimimg[2],
-					sizemin = max(0.02,0.1/finesample), sizemax = sqrt(prod(dimimg))/2,
-					slopemin = 0.1, slopemax=20, axratmin=0.02, axratmax=1,
-					magmin = mag-25, magmax=mag+25,
-					fitx = TRUE, fitmag = TRUE, fitsize=TRUE, fitslope = TRUE,
-					fitang = TRUE, fitaxrat = TRUE, fitbox=FALSE,
-					fitsky = FALSE, addsky = TRUE,
-					skybg = skylevel*gain_eff, skybgsd = skyRMS*gain_eff,
-					xsd=2, ysd=2, magsd=0.5, unlog=TRUE
-				)
-				siglistsbexpd = makeProfitSingleSourceLists(profile = "brokenexp",
-					x=unname(best["xcen1"]), y=unname(best["ycen1"]), mag = unname(best["mag2"]),
-					size = unname(best["re2"]), slope = unname(best["re2"])-0.3, ang=unname(best["ang1"]),
-					axrat = unname(best["axrat2"]), box=0, extra=list(a=1,rb=unname(best["re2"])-0.3),
-					xmin = 0, xmax=dimimg[1], ymax=dimimg[2],
-					sizemin = max(0.02,0.1/finesample), sizemax = sqrt(prod(dimimg))/2,
-					slopemin = 0.1, slopemax=20, axratmin=0.02, axratmax=1,
-					magmin = mag-25, magmax=mag+25, extramin = list(a=0,rb=0), extramax=list(a=100,rb=dimimg[1]),
-					fitx = FALSE, fitmag = TRUE, fitsize=TRUE, fitslope = TRUE,
-					fitang = FALSE, fitaxrat = TRUE, fitbox=FALSE, fitsky = FALSE,
-					fitextra = list(a=TRUE,rb=TRUE), addsky = TRUE,
-					skybg = skylevel*gain_eff, skybgsd = skyRMS*gain_eff,
-					xsd=2, ysd=2, magsd=0.5, unlog=TRUE
-				)
-				lists = profitCombineLists(list(siglistsbexpb$lists,siglistsbexpd$lists))
-
-				constraints <- function(modellist) {
-					modellist$brokenexp$xcen = modellist$sersic$xcen
-					modellist$brokenexp$ycen = modellist$sersic$ycen
-					modellist$brokenexp$ang = modellist$sersic$ang
-					return(modellist)
+				if(!is.null(galfit$data[[bexpname]]$LDFit))
+				{
+					best = getLDFitBest(galfit$data[[bexpname]])
+				} else if(!is.null(galfit$data[[bexpname]]$MLFit)) {
+					best = galfit$data[[bexpname]]$MLFit$par
+					names(best) = names(galfit$data[[bexpname]]$Data$init)
 				}
-				environment(constraints) = .GlobalEnv
+				if(!is.null(galfit$data[[bexpname]]$Data))
+				{
+					newData = galfit$data[[bexpname]]$Data
+					newData$init = best
+					benchmarks = profitDataBenchmark(
+						modellist = newData$modellist, calcregion = newData$calcregion,
+						imgdim = dim(newData$image), finesample = newData$finesample, psf = newData$psf, fitpsf = newData$fitpsf,
+						nbenchmark = 1L, benchconvmethods = profitAvailableConvolvers(),
+						benchintmethods = profitAvailableIntegrators(), benchopenclenvs = openclenvs,
+						printbenchmark = TRUE)
+					newData = profitDataSetOptionsFromBenchmarks(newData, benchmarks)
+				} else {
+					names(best) = unlist(lapply(names(best), function(x) { return(substr(x,8,nchar(x)))}))
+					mag = -2.5*log10(sum(10^(-0.4*best["mag1"])+10^(-0.4*best["mag2"])))
 
-				# TODO: there should be a better way of doing this...
-				# It's a verbose way of re-applying all of the relevant
-				# limits and constraints to the input params so that
-				# profitSetupData doesn't barf on axrat>1, say
-				whichfit = which(unlist(lists$tofit))
-				best = unlist(lists$modellist)[whichfit]
-				whichlog = which(unlist(lists$tolog)[whichfit])
-				best[whichlog] = log10(best[whichlog])
+					siglistsbexpb = makeProfitSingleSourceLists(
+						profile = "sersic",
+						x=unname(best["xcen1"]), y=unname(best["ycen1"]), mag = unname(best["mag1"]),
+						size = unname(best["re1"]), slope = unname(best["nser1"]), ang=unname(best["ang1"]),
+						axrat = unname(best["axrat1"]), box=0, xmin = 0, xmax=dimimg[1], ymax=dimimg[2],
+						sizemin = max(0.02,0.1/finesample), sizemax = 5*sqrt(prod(dimimg))/2,
+						slopemin = 0.1, slopemax=20, axratmin=0.02, axratmax=1,
+						magmin = mag-25, magmax=mag+25,
+						fitx = TRUE, fitmag = TRUE, fitsize=TRUE, fitslope = TRUE,
+						fitang = TRUE, fitaxrat = TRUE, fitbox=FALSE,
+						fitsky = FALSE, addsky = TRUE,
+						skybg = skylevel*gain_eff, skybgsd = skyRMS*gain_eff,
+						xsd=2, ysd=2, magsd=0.5, unlog=TRUE
+					)
+					siglistsbexpd = makeProfitSingleSourceLists(
+						profile = "brokenexp",
+						x=unname(best["xcen1"]), y=unname(best["ycen1"]), mag = unname(best["mag2"]),
+						size = unname(best["re2"]), slope = unname(best["re2"])-0.3, ang=unname(best["ang1"]),
+						axrat = unname(best["axrat2"]), box=0, extra=list(a=1,rb=unname(best["re2"])-0.3),
+						xmin = 0, xmax=dimimg[1], ymax=dimimg[2],
+						sizemin = max(0.02,0.1/finesample), sizemax = 5*sqrt(prod(dimimg))/2,
+						slopemin = 0.1, slopemax=20, axratmin=0.02, axratmax=1,
+						magmin = mag-25, magmax=mag+25, extramin = list(a=0,rb=1e-2), extramax=list(a=100,rb=dimimg[1]),
+						fitx = FALSE, fitmag = TRUE, fitsize=TRUE, fitslope = TRUE,
+						fitang = FALSE, fitaxrat = TRUE, fitbox=FALSE, fitsky = FALSE,
+						fitextra = list(a=TRUE,rb=TRUE), addsky = TRUE,
+						skybg = skylevel*gain_eff, skybgsd = skyRMS*gain_eff,
+						xsd=2, ysd=2, magsd=0.5, unlog=TRUE
+					)
+					lists = profitCombineLists(list(siglistsbexpb$lists,siglistsbexpd$lists))
 
-				remake = profitRemakeModellist(parm=best,
-					modellist=lists$modellist, tofit = lists$tofit, tolog = lists$tolog,
-					intervals = lists$intervals, constraints = constraints)
-				lists$modellist = remake$modellist
+					constraints <- function(modellist) {
+						modellist$brokenexp$xcen = modellist$sersic$xcen
+						modellist$brokenexp$ycen = modellist$sersic$ycen
+						modellist$brokenexp$ang = modellist$sersic$ang
+						return(modellist)
+					}
+					environment(constraints) = .GlobalEnv
 
-				newData=profitSetupData(image, sigma=sigma, region=region,
-					modellist=lists$modellist, tofit=lists$tofit,
-					tolog=lists$tolog, intervals=lists$intervals, psf=psfim,
-					priors=lists$priors, algo.func='LD',like.func="norm",
-					nbenchmark = 3L, benchconvmethods = convmethods,
-					benchintmethods = profitAvailableIntegrators(),
-					verbose=FALSE, omp_threads = nthreads,
-					finesample=finesample, psffinesampled = TRUE,
-					constraints = constraints, benchopenclenvs = openclenvs)
-				newData$tolog$brokenexp$rb = TRUE
-				newData$mon.names = c(newData$mon.names, chisq="chisq")
-				newData$gain = gain_eff
+					# TODO: there should be a better way of doing this...
+					# It's a verbose way of re-applying all of the relevant
+					# limits and constraints to the input params so that
+					# profitSetupData doesn't barf on axrat>1, say
+					whichfit = which(unlist(lists$tofit))
+					best = unlist(lists$modellist)[whichfit]
+					whichlog = which(unlist(lists$tolog)[whichfit])
+					best[whichlog] = log10(best[whichlog])
 
-				mlfit = convergeFit(newData, inititer = maxiter/4, maxruns=maxrunsml,
+					remake = profitRemakeModellist(parm=best,
+																				 modellist=lists$modellist, tofit = lists$tofit, tolog = lists$tolog,
+																				 intervals = lists$intervals, constraints = constraints)
+					lists$modellist = remake$modellist
+
+					newData=profitSetupData(
+						image, sigma=sigma, region=region,
+						modellist=lists$modellist, tofit=lists$tofit,
+						tolog=lists$tolog, intervals=lists$intervals, psf=psfim,
+						priors=lists$priors, algo.func='LD',like.func="norm",
+						nbenchmark = 3L, benchconvmethods = convmethods,
+						benchintmethods = profitAvailableIntegrators(),
+						benchprecisions = precisions,
+						verbose=FALSE, omp_threads = nthreads,
+						finesample=finesample, psffinesampled = TRUE,
+						constraints = constraints, benchopenclenvs = openclenvs)
+					newData$tolog$brokenexp$rb = TRUE
+					newData$mon.names = c(newData$mon.names, chisq="chisq")
+					newData$gain = gain_eff
+				}
+
+				if(finesample > 1L)
+				{
+					newData$lo=profitSetupData(
+						image, sigma=sigma, region=region,
+						modellist=newData$modellist, tofit=newData$tofit,
+						tolog=newData$tolog, intervals=newData$intervals, psf=psflo,
+						priors=newData$priors, algo.func='LD',like.func="norm",
+						nbenchmark = 3L, benchconvmethods = convmethods,
+						benchintmethods = profitAvailableIntegrators(),
+						benchprecisions = precisions,
+						verbose=FALSE, omp_threads = nthreads,
+						finesample=1L,
+						constraints = newData$constraints, benchopenclenvs = openclenvs)
+					newData$lo$mon.names = c(newData$mon.names, chisq="chisq")
+					newData$lo$gain = gain_eff
+
+					mlfit = convergeFit(newData$lo, init=newData$init, inititer = maxiter/4, maxruns=maxrunsml,
+						domcmc = FALSE, docma = FALSE, cmasigma = NULL, cmaiter = 200,
+						cmaresetmaxruns = TRUE, cmasigmamult = 1, cmatolfrac = 0.01,
+						maxwalltime = tfinal-timeinmins())
+					newinit = mlfit$par
+				} else {
+					newinit = newData$init
+				}
+
+				mlfit = convergeFit(newData, init = newinit, inititer = maxiter/4, maxruns=maxrunsml,
 					domcmc = FALSE, docma = FALSE, cmasigma = NULL, cmaiter = 200,
-					cmaresetmaxruns = TRUE, cmasigmamult = 1, cmatolfrac = 0.01, maxwalltime = tfinal-tinit)
-				overtime = exceededmaxtime(tinit,tfinal)
+					cmaresetmaxruns = TRUE, cmasigmamult = 1, cmatolfrac = 0.01,
+					maxwalltime = tfinal-timeinmins())
 				if(!is.null(newData$convopt$fft$fftwplan)) newData$convopt$fft$fftwplan = NULL
-				galfit$data[[bexpname]] = list(Data=newData,MLFit=mlfit,MLDone=!overtime,DoMCMC=TRUE)
-				if(overtime) return(galfit)
+				galfit$data[[bexpname]] = list(Data=newData,MLFit=mlfit,MLDone=!mlfit$overtime,DoMCMC=TRUE)
+				if(mlfit$overtime) return(galfit)
 			}
 			fipabexp = bexpname
 			bexpname = "serbexp_frpa"
@@ -1244,29 +1386,42 @@ profitFitGalaxyComponents <- function(image, sigma, psfim,
 				}
 				newData$init = unlist(newData$modellist)[which(unlist(newData$tofit))]
 				newData$init[names(best)] = best
+				newData$parm.names = names(newData$init)
 
-				mlfit = convergeFit(newData, inititer = maxiter/4, maxruns=maxrunsml,
-					domcmc = FALSE, maxwalltime = tfinal-tinit)
-				overtime = exceededmaxtime(tinit,tfinal)
-				# Try reversing component mags again
-				if(!overtime)
+				if(finesample > 1L)
 				{
-					init = mlfit$par
-					names(init) = names(newData$init)
-					whichmag = c("sersic.mag","brokenexp.mag")
-					init[whichmag] = rev(init[whichmag])
-					mlfitnew = convergeFit(newData, init = init, inititer = maxiter/4,
-						maxruns=maxrunsml, domcmc = FALSE, maxwalltime = tfinal-tinit)
-					if(mlfitnew$value > mlfit$value)
+					newData$lo$constraints = newData$constraints
+					newData$lo$tofit$brokenexp$ang = TRUE
+					newData$lo$init = newData$init
+					mlfit = convergeFit(newData$lo, inititer = maxiter/4, maxruns=maxrunsml,
+						domcmc = FALSE, maxwalltime = tfinal-timeinmins())
+					newData$init = mlfit$par
+				}
+
+				overtime = exceededmaxtime(timeinmins(), tfinal)
+				{
+					mlfit = convergeFit(newData, inititer = maxiter/4, maxruns=maxrunsml,
+						domcmc = FALSE, maxwalltime = tfinal-timeinmins())
+					# Try reversing component mags again
+					if(!mlfit$overtime)
 					{
-						mlfit = mlfitnew
-						newData$init = init
+						init = mlfit$par
+						names(init) = names(newData$init)
+						whichmag = c("sersic.mag","brokenexp.mag")
+						init[whichmag] = rev(init[whichmag])
+						mlfitnew = convergeFit(newData, init = init, inititer = maxiter/4,
+							maxruns=maxrunsml, domcmc = FALSE, maxwalltime = tfinal-timeinmins())
+						if(mlfitnew$value > mlfit$value)
+						{
+							mlfit = mlfitnew
+							newData$init = init
+						}
+						mlfit$overtime = mlfitnew$overtime
 					}
-					overtime = exceededmaxtime(tinit,tfinal)
 				}
 				if(!is.null(newData$convopt$fft$fftwplan)) newData$convopt$fft$fftwplan = NULL
-				galfit$data[[bexpname]] = list(Data=newData,MLFit=mlfit,MLDone=!overtime,DoMCMC=TRUE)
-				if(overtime) return(galfit)
+				galfit$data[[bexpname]] = list(Data=newData,MLFit=mlfit,MLDone=!mlfit$overtime,DoMCMC=TRUE)
+				if(mlfit$overtime) return(galfit)
 			}
 		}
 		if(adddisk)
@@ -1275,10 +1430,10 @@ profitFitGalaxyComponents <- function(image, sigma, psfim,
 			isnull = is.null(galfit$data[[modelname]])
 			if(isnull)
 			{
+				init = galfit$data[[paste0("ser_fipa_",ncomp)]]$MLFit$par
 				# Now let the position angle and Sersic index go free and update init
 				for(par in c("nser","ang"))
 				{
-					init = Data$init
 					Data$tofit$sersic[[par]][ncomp] = TRUE
 					modpar = paste0("sersic.",par)
 					last = which(startsWith(names(init),modpar))[ncomp-1]
@@ -1286,9 +1441,10 @@ profitFitGalaxyComponents <- function(image, sigma, psfim,
 					if(Data$tolog$sersic[[par]][ncomp-1]) val = log10(val)
 					init = c(init[1:last],val,init[(1+last):length(init)])
 					names(init)[last+1] = paste0(modpar,ncomp)
-					Data$init = init
-					Data$parm.names = names(Data$init)
 				}
+				Data$init = init
+				Data$parm.names = names(Data$init)
+				for(var in c("tofit","init","parm.names")) Data$lo[[var]] = Data[[var]]
 			}
 		}
 		complete = !isnull && !is.null(galfit$data[[modelname]]$MLDone) && galfit$data[[modelname]]$MLDone
@@ -1298,23 +1454,49 @@ profitFitGalaxyComponents <- function(image, sigma, psfim,
 			mlfit = galfit$data[[modelname]]$MLFit
 			Data$init = mlfit$par
 		} else if(!adddisk) init = Data$init
+		if(!isnull || identical(Data$convopt$convolver,new("externalptr")))
+		{
+			benchmarks = profitDataBenchmark(
+				modellist = Data$modellist, calcregion = Data$calcregion,
+				imgdim = dim(Data$image), finesample = Data$finesample, psf=Data$psf, fitpsf = FALSE,
+				omp_threads = nthreads, nbenchmark = 3L, benchconvmethods = convmethods,
+				benchintmethods = profitAvailableIntegrators(), benchprecisions = precisions,
+				benchopenclenvs = openclenvs)
+			Data = profitDataSetOptionsFromBenchmarks(Data, benchmarks)
+			if(finesample > 1L)
+			{
+				benchmarks = profitDataBenchmark(
+					modellist = Data$lo$modellist, calcregion = Data$lo$calcregion,
+					imgdim = dim(Data$lo$image), finesample = Data$lo$finesample, psf=Data$lo$psf, fitpsf = FALSE,
+					omp_threads = nthreads, nbenchmark = 3L, benchconvmethods = convmethods,
+					benchintmethods = profitAvailableIntegrators(), benchprecisions = precisions,
+					benchopenclenvs = openclenvs)
+				Data$lo = profitDataSetOptionsFromBenchmarks(Data$lo, benchmarks)
+			}
+		}
 		if(!complete)
 		{
 			cmasigma = c(rep(0.5,2),rep(0.1,3*ncomp), rep(2,ncomp), rep(0.1,ncomp))
-			tinit = timeinmins()
 			if(domcmc) maxrunsml = Inf
 			else maxrunsml=maxruns
+			if(finesample > 1L)
+			{
+				mlfit = convergeFit(Data$lo, inititer = maxiter/4, domcmc = FALSE,
+					maxruns = maxruns, maxwalltime = tfinal-timeinmins())
+				Data$init = mlfit$par
+			}
 			mlfit = convergeFit(Data, inititer = maxiter/4, maxruns=maxrunsml,
 				domcmc = FALSE, docma = TRUE, cmasigma = cmasigma, cmaiter = 200,
-				cmaresetmaxruns = TRUE, cmasigmamult = 1, cmatolfrac = 0.01, maxwalltime = tfinal-tinit)
-			overtime = exceededmaxtime(tinit,tfinal)
+				cmaresetmaxruns = TRUE, cmasigmamult = 1, cmatolfrac = 0.01,
+				maxwalltime = tfinal-timeinmins())
 			if(!is.null(Data$convopt$fft$fftwplan)) Data$convopt$fft$fftwplan = NULL
-			galfit$data[[modelname]] = list(Data=Data,MLFit=mlfit,MLDone=!overtime,DoMCMC=TRUE)
-			if(overtime) return(galfit)
+			galfit$data[[modelname]] = list(Data=Data,MLFit=mlfit,MLDone=!mlfit$overtime,DoMCMC=TRUE)
+			if(mlfit$overtime) return(galfit)
 		} else {
 			mlfit = galfit$data[[modelname]]$MLFit
 		}
 		init = profitRemakeModellist(mlfit$par, Data=Data)$parm
+		if(identical(Data$convopt$convolver,new("externalptr"))) Data$convopt$convolver = NULL
 		chisqredgal = profitLikeModel(init, Data)$Monitor["chisq"]/ndof
 	}
 	if(domcmc)
@@ -1326,7 +1508,7 @@ profitFitGalaxyComponents <- function(image, sigma, psfim,
 				stopifnot(!is.null(galfit$data[[modtype]]$DoMCMC))
 				if(galfit$data[[modtype]]$DoMCMC)
 				{
-					complete = !is.null(galfit$data[[modelname]]$MCMCDone) && galfit$data[[modelname]]$MCMCDone
+					complete = !is.null(galfit$data[[modtype]]$MCMCDone) && galfit$data[[modtype]]$MCMCDone
 					if(!complete)
 					{
 						Data = galfit$data[[modtype]]$Data
@@ -1346,11 +1528,23 @@ profitFitGalaxyComponents <- function(image, sigma, psfim,
 							Data$sigma = sqrt(Data$image)
 							Data$image = Data$image - skylevel*skygain
 						}
-						tinit = timeinmins()
+						benchmarks = profitDataBenchmark(
+							modellist = Data$modellist, calcregion = Data$calcregion,
+							imgdim = dim(Data$image), finesample = Data$finesample, psf=Data$psf, fitpsf = FALSE,
+							omp_threads = nthreads, nbenchmark = 3L, benchconvmethods = convmethods,
+							benchintmethods = profitAvailableIntegrators(), benchprecisions = precisions,
+							benchopenclenvs = openclenvs)
+						Data = profitDataSetOptionsFromBenchmarks(Data, benchmarks)
+						parnames = names(Data$init)
+						if(!identical(Data$parm.names,parnames))
+						{
+							stopifnot(is.character(parnames) && identical(length(parnames),length(Data$init)))
+							Data$parm.names = parnames
+						}
 						LDFit = convergeFit(Data, init=Data$init, inititer = maxiter/2,
 							finaliter = maxiter, domlfit = TRUE, domcmc = TRUE,
-							inititermcmc = maxiter/5, maxwalltime = tfinal-tinit)
-						overtime = exceededmaxtime(tinit,tfinal)
+							inititermcmc = maxiter/5, maxwalltime = tfinal-timeinmins())
+						overtime = exceededmaxtime(timeinmins(),tfinal)
 						galfit[[fittype]][[modtype]]$LDFit = LDFit
 						galfit[[fittype]][[modtype]]$MCMCDone = !overtime
 						if(overtime) return(galfit)
